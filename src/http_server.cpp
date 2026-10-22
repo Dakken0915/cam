@@ -571,6 +571,17 @@ void HttpServer::updateFrame(const std::vector<uint8_t>& jpeg) {
 }
 
 /**
+ * @brief  Save the current JPEG for a non-HTTP trigger such as the LCD button.
+ * @param  [out] path Saved file path when the operation succeeds.
+ * @retval SnapshotResult Result from the shared snapshot writer.
+ * @note   Uses the same directory, quota, naming, and locking rules as /snapshot.
+ */
+HttpServer::SnapshotResult HttpServer::captureSnapshot(std::string& path) {
+    std::vector<uint8_t> jpeg;
+    return saveSnapshot(jpeg, path);
+}
+
+/**
  * @brief  Stop listening, shut down clients, and wait for all handlers.
  * @note   Safe to call repeatedly; handler completion is required before object destruction.
  */

@@ -14,10 +14,11 @@ cam/
 ├── Makefile.arm              Buildroot ARM 交叉编译
 ├── include/                  模块接口和数据结构
 ├── src/                      应用入口与模块实现
+│   └── touchscreen.cpp       Linux evdev 触摸读取
 ├── tests/                    独立 C++ 回归测试
 ├── build/                    本机编译产物（构建时生成）
 ├── build_arm/                ARM 编译产物（构建时生成）
-└── snapshots/                默认截图目录（首次截图时生成）
+└── /root/photos/             板端默认照片目录（首次拍照时生成）
 ```
 
 | 文件 | 职责与关键接口 |
@@ -26,6 +27,7 @@ cam/
 | [src/v4l2.cpp](src/v4l2.cpp)、[include/v4l2.hpp](include/v4l2.hpp) | `V4l2Capture` 封装格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
 | [src/jpeg_encoder.cpp](src/jpeg_encoder.cpp)、[include/jpeg_encoder.hpp](include/jpeg_encoder.hpp) | `convertToBgr` 转换 YUYV，`encodeBgr` 压缩 JPEG；`encode` 保留直接编码 YUYV 的接口。 |
 | [src/framebuffer.cpp](src/framebuffer.cpp)、[include/framebuffer.hpp](include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
+| [src/touchscreen.cpp](src/touchscreen.cpp)、[include/touchscreen.hpp](include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
 | [src/http_server.cpp](src/http_server.cpp)、[include/http_server.hpp](include/http_server.hpp) | `HttpServer` 提供网页、MJPEG 和截图，维护最新 JPEG、客户端数量和截图配额。页面 HTML/CSS/JavaScript 内嵌在源文件中。 |
 | [include/frame.hpp](include/frame.hpp) | `Frame` 保存数据、序号、尺寸、行跨度和单调时钟时间戳。 |
 | [include/bounded_queue.hpp](include/bounded_queue.hpp) | `BoundedQueue<T>` 提供线程安全的 `push`、阻塞 `take` 和 `close`。 |
@@ -51,11 +53,18 @@ flowchart LR
     G --> H["主线程：updateFrame"]
     H --> I["HTTP 最新帧缓存"]
     I --> J["客户端线程：MJPEG 或截图"]
+    K["触摸线程：evdev release"] --> L["LCD PHOTO 按钮命中"]
+    L --> M["共享快照保存：/root/photos"]
+    I --> M
 ```
 
 LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接收连接的线程，每个已接纳客户端使用独立处理线程。
 
 两个队列满时丢最旧帧，不让内存随积压无限增长。HTTP 客户端读取最新 JPEG，慢客户端可以跳过中间帧。容量限制不能保证固定延迟；LCD 和 JPEG 在同一线程串行执行，编码耗时仍会影响显示帧率。
+
+当 LCD 初始化成功时，显示层在右下角绘制固定大小的相机图标按钮。触摸线程打开显式指定的 evdev 设备，或自动扫描 `/dev/input/event*`；只有同时具备触摸按键（`BTN_TOUCH`/`BTN_LEFT`）和绝对 X/Y 轴的设备才会被选中。触摸按下后在按钮内释放，才触发一次拍照。原始触摸范围通过 `EVIOCGABS` 读取，再线性映射到 framebuffer 可见分辨率。
+
+触摸拍照和 HTTP `/snapshot` 共用同一个 JPEG 快照保存函数，因此命名、配额、目录创建、写盘锁和错误结果一致。默认目录为 `/root/photos`；目录不可写、尚无首帧或达到张数配额时，触摸线程只记录错误，不会写入空文件。按钮图标只绘制到 LCD 显存，不会混入 JPEG 或网页视频。
 
 ### 2.2 采集格式、缓冲区与数据有效性
 
@@ -100,6 +109,8 @@ offset = (yoffset + y) * line_length + (xoffset + x) * (bits_per_pixel / 8)
 | `FramebufferSurface::configure` | 借用内存而不持有所有权；在 `reset` 前必须保持内存有效，并保持显示模式不变。 |
 | `BoundedQueue::close` | 拒绝后续入队并唤醒消费者；队列接口可排空已有数据，但应用退出时可能丢弃待处理原始帧。队列不能重新打开。 |
 | `HttpServer::updateFrame` | 复制非空 JPEG 并递增内部序号，客户端发送时不持有帧锁。 |
+| `HttpServer::captureSnapshot` | 供触摸线程调用的本地快照入口；复用 `/snapshot` 的保存逻辑和 `SnapshotResult`。 |
+| `Touchscreen::waitForTap` | 只在触摸释放时返回归一化坐标；超时返回 false。 |
 
 ### 2.5 HTTP、截图与资源限制
 
@@ -112,9 +123,9 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 | socket 接收/发送超时 | 每次接收约 5 秒、每次发送约 2 秒；不是整条请求的绝对时限 |
 | 最新帧缓存 | 1 张 JPEG；每个发送客户端另有自己的帧副本 |
 | 截图配额 | 默认 100 张，按目录中 `snapshot_*.jpg` 命名匹配项计数；不是磁盘字节配额 |
-| 截图文件名 | `snapshot_YYYYMMDD_HHMMSS_微秒_递增序号.jpg`，时间使用系统本地时区 |
+| 截图文件名 | `snapshot_YYYYMMDD_HHMMSS_微秒_递增序号.jpg`，触摸和 HTTP 使用同一命名，时间使用系统本地时区 |
 
-截图先保存到板端，再返回同一份 JPEG 下载。配额检查与写文件串行执行；不会自动删除旧截图。创建目录仅调用一次 `mkdir`，自定义路径的父目录须预先存在。截图写入成功不等于执行过 `fsync`，异常断电后的持久性仍取决于文件系统。
+截图先保存到板端，再返回同一份 JPEG 下载。触摸拍照只保存文件，不发送 HTTP 响应。配额检查与写文件串行执行；不会自动删除旧截图。默认 `/root/photos` 的父目录 `/root` 已存在；自定义路径的父目录须预先存在。截图写入成功不等于执行过 `fsync`，异常断电后的持久性仍取决于文件系统。
 
 截图配额和客户端上限通过 `HttpServer` 构造参数设置，当前没有对应命令行选项。服务没有认证、TLS 或访问授权；应在可控网络运行，公网部署需另外配置访问控制。
 
@@ -122,7 +133,7 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
-目前不支持 MJPEG-only、UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。JPEG 使用 CPU 编码；单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。
+目前不支持 MJPEG-only、UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。JPEG 使用 CPU 编码；单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
 
 ## 3. 学习指南
 
@@ -134,8 +145,9 @@ Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列
 | 2. V4L2 | 字符设备、ioctl、MMAP、缓冲区队列、非阻塞 I/O、poll | 阅读 `open/start/getFrame`，运行 `make test_v4l2`，跟踪短帧和映射失败路径。 |
 | 3. 图像处理 | YUYV 4:2:2、BGR、步长、JPEG 有损压缩 | 阅读编码模块，运行 `make test_video`，说明为何奇数宽度非法、末行填充可省略。 |
 | 4. LCD | framebuffer、RGB 位域、小端字节序、可见/虚拟分辨率 | 阅读显示模块，用地址公式计算带偏移与填充的像素位置，理解黑边测试。 |
-| 5. 并发 | mutex、condition_variable、atomic、信号安全、线程 join | 阅读队列和主流程，追踪采集故障如何让主线程结束等待。 |
-| 6. 网络与板端 | TCP 短写、HTTP multipart、SIGPIPE、交叉编译、动态链接 | 阅读 `writeAll/serveStream/stop`，对照 SDK sysroot 和目标动态库部署应用。 |
+| 5. 触摸输入 | evdev、`input_event`、`EVIOCGBIT`、`EVIOCGABS`、绝对坐标归一化 | 阅读 `Touchscreen::openCandidate/waitForTap`，用 `evtest` 核对触摸按键和轴范围。 |
+| 6. 并发 | mutex、condition_variable、atomic、信号安全、线程 join | 阅读队列和主流程，追踪采集故障如何让主线程结束等待。 |
+| 7. 网络与板端 | TCP 短写、HTTP multipart、SIGPIPE、交叉编译、动态链接 | 阅读 `writeAll/serveStream/stop`，对照 SDK sysroot 和目标动态库部署应用。 |
 
 ### 3.2 关键知识点
 
@@ -162,7 +174,7 @@ Follow the root `AGENTS.md` rule for every function and important callback. Use 
 
 Interface comments describe ownership, cache reuse, exceptions, and output validity where relevant. Implementation comments describe the operation without repeating each source line. This update converted function comments in headers, sources, and tests from Chinese `功能` blocks to the required English Doxygen format.
 
-Validation: all 114 function comment blocks use English `@brief` descriptions. The application and all three test executables rebuilt successfully with `-Wall -Wextra`. Preprocessed output for all eight C++ source files remained identical, confirming that the comment changes did not alter executable code. Tests were not rerun for this comment-only correction; the earlier runtime results remain recorded in section 4.7.
+Validation: all 147 function comment blocks use English `@brief` descriptions. The application and all three test executables rebuilt successfully with `-Wall -Wextra`. Preprocessed output for the existing nine C++ source/test files remained identical during the previous comment-only correction; the new touchscreen implementation is covered by the current application build. Video and simulated V4L2 tests were rerun after this feature update; real touchscreen and LCD behavior still require board testing.
 
 ## 4. 工程使用说明、编译命令与预期效果
 
@@ -174,9 +186,10 @@ Validation: all 114 function comment blocks use English `@brief` descriptions. T
 | ARM 构建机 | 板卡 Buildroot SDK、匹配 sysroot 的交叉编译器、ARM OpenCV 安装目录 |
 | 板端摄像头 | 可读写的 video 节点，支持单平面逐行 YUYV 和 MMAP streaming |
 | 板端 LCD | 正确配置的 LCDIF/面板时序及背光，可读写的 framebuffer 真彩色节点 |
+| 板端触摸屏 | 可读的 evdev 事件节点，提供 `BTN_TOUCH`/`BTN_LEFT` 与绝对 X/Y 轴 |
 | 板端存储与网络 | 可写截图目录、足够剩余空间、可达的 HTTP 端口和匹配动态库 |
 
-LCD 的 1280x640 分辨率、像素时钟、同步极性和引脚配置由板卡 BSP/设备树完成。避免 fbcon、图形服务或其他进程同时写同一显存；程序运行中不要更改 framebuffer 模式。
+LCD 的 1280x640 分辨率、像素时钟、同步极性和引脚配置由板卡 BSP/设备树完成。触摸设备节点和坐标轴范围由触摸驱动注册。避免 fbcon、图形服务或其他进程同时写同一显存；程序运行中不要更改 framebuffer 模式。
 
 ### 4.2 Linux 本机构建与测试
 
@@ -205,29 +218,38 @@ make test_http_server
 
 ### 4.3 ARM 交叉编译与部署
 
-先将板卡 SDK 的编译器目录加入 PATH，确认工具可用：
+本机 100ask Buildroot SDK 位于 `$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot`。`Makefile.arm` 默认使用该 SDK 的编译器，并将 OpenCV 前缀设为 `$HOME/opencv_arm_buildroot_install`。SDK sysroot 应与板端 glibc、libstdc++ 和浮点 ABI 匹配；不要回退到 WSL Ubuntu 自带的 ARM 编译器。其他位置的 SDK 可通过 `BUILDROOT_SDK=...` 覆盖。
 
 ```sh
-command -v arm-buildroot-linux-gnueabihf-g++
-make -f Makefile.arm cam_server_arm OPENCV_ARM=/path/to/opencv_arm_install
+SDK="$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot"
+"$SDK/bin/arm-buildroot-linux-gnueabihf-g++" -dumpmachine
+"$SDK/bin/arm-buildroot-linux-gnueabihf-g++" -print-sysroot
+```
+
+OpenCV 源码在 `~/workspace/opencv_src/opencv` 时，可使用同一 Buildroot SDK 构建动态库：
+
+```sh
+cmake -S "$HOME/workspace/opencv_src/opencv" \
+  -B "$HOME/workspace/opencv_src/build-arm-100ask" \
+  -DCMAKE_TOOLCHAIN_FILE="$SDK/share/buildroot/toolchainfile.cmake" \
+  -DCMAKE_INSTALL_PREFIX="$HOME/opencv_arm_buildroot_install" \
+  -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DWITH_JPEG=ON
+cmake --build "$HOME/workspace/opencv_src/build-arm-100ask" --parallel 2
+cmake --install "$HOME/workspace/opencv_src/build-arm-100ask"
+make -f Makefile.arm cam_server_arm
 file build_arm/cam_server_arm
 ```
 
-`/path/to/opencv_arm_install` 是待替换路径，目录应包含 `include/opencv4/` 和 `lib/`；默认值为 `$HOME/opencv_arm_install`。若 SDK 编译器名称不同，可通过 make 命令行覆盖：
-
-```sh
-make -f Makefile.arm cam_server_arm CXX=/path/to/sdk/bin/arm-linux-gnueabihf-g++ OPENCV_ARM=/path/to/opencv_arm_install
-```
-
-该 ARM 规则链接 `opencv_core`、`opencv_imgproc`、`opencv_imgcodecs` 和 pthread；OpenCV 必须启用 JPEG 编码支持。额外动态库依赖由目标 OpenCV 的构建配置决定。
+该 ARM 规则已在 `Makefile.arm` 内固定使用工程上级的 `../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot` 和 `../../opencv_arm_buildroot_install`，因此不需要在命令行重复传入路径；路径以 Makefile 所在目录计算，从其他工作目录调用也有效。命令链接 `opencv_core`、`opencv_imgproc`、`opencv_imgcodecs` 和 pthread；OpenCV 必须启用 JPEG 编码支持。额外动态库依赖由目标 OpenCV 的构建配置决定。需要独立输出目录时可追加 `OBJ_DIR=build_arm_100ask`；构建应用与 OpenCV 时应使用同一个 SDK，避免引入比板端更新的 GLIBC/GLIBCXX 符号版本。
 
 把 `build_arm/cam_server_arm` 和匹配的运行库部署至板卡。例如将程序放到 `/opt/cam/`、私有动态库放到 `/opt/cam/lib/` 后，在板端执行：
 
 ```sh
 cd /opt/cam
 chmod +x ./cam_server_arm
-mkdir -p /opt/cam/snapshots
-LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0 --snapshot-dir /opt/cam/snapshots
+mkdir -p /root/photos
+LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0 --snapshot-dir /root/photos
 ```
 
 自定义库路径示例应包含全部依赖；若库已安装在系统标准搜索路径，可省略 `LD_LIBRARY_PATH`。切换 SDK 或 OpenCV 安装路径后，先执行 `make -f Makefile.arm clean` 再构建，避免沿用旧二进制。两个构建文件的 clean 分别删除各自输出目录。
@@ -243,22 +265,24 @@ LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0
 | `--no-lcd` | 未启用 | 禁用 LCD，与 `--fb` 互斥 |
 | `--port N` | 8080 | HTTP 监听端口，1..65535；端口占用或无权限时退出 |
 | `--quality N` | 80 | JPEG 质量，1..100；不是帧率参数 |
-| `--snapshot-dir PATH` | `./snapshots` | 相对路径基于运行工作目录；建议板端使用绝对路径 |
+| `--snapshot-dir PATH` | `/root/photos` | 触摸和 HTTP 图片保存目录；父目录须已存在且可写 |
+| `--touch PATH` | 自动扫描 | 显式指定触摸 evdev 节点；指定后设备打开失败会退出 |
+| `--no-touch` | 未启用 | 禁用 LCD 拍照按钮和触摸线程 |
 | `--help` | 未启用 | 显示帮助并退出，不打开设备 |
 
 LCD 与网络同时输出：
 
 ```sh
-./cam_server_arm --device /dev/video1 --fb /dev/fb0 --width 640 --height 480 --port 8080 --quality 80
+./cam_server_arm --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 --width 640 --height 480 --port 8080 --quality 80
 ```
 
 仅网络输出：
 
 ```sh
-./cam_server_arm --device /dev/video1 --no-lcd --port 8080
+./cam_server_arm --device /dev/video1 --no-lcd --no-touch --port 8080
 ```
 
-直接运行 `./cam_server_arm` 会尝试可选 LCD；失败时打印 `Continuing with HTTP only` 并继续初始化摄像头。显式 `--fb /dev/fb0` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
+直接运行 `./cam_server_arm` 会尝试可选 LCD 和自动触摸设备；失败时分别打印提示并继续 HTTP/摄像头功能。显式 `--fb /dev/fb0` 或 `--touch /dev/input/event1` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
 
 ### 4.5 预期日志、画面与 HTTP 接口
 
@@ -266,13 +290,17 @@ LCD 与网络同时输出：
 
 ```text
 [LCD] /dev/fb0 1280x640 16 bpp, stride=2560
+[LCD] PHOTO button x=1040 y=540 w=220 h=80
 [V4L2] 驱动: <driver> 设备: <card>
 [V4L2] 分辨率为640x480 YUYV
 [V4L2] 采集已启动
 [HTTP] Server listening on port 8080
+[Touch] Opened /dev/input/event1 range=0..4095,0..4095
 ```
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
+
+LCD 打开后会立即在右下角显示蓝底白边的相机图标和 `PHOTO` 按钮，按钮坐标同时输出为 `[LCD] PHOTO button x=... y=... w=... h=...`。触摸并释放按钮后，日志输出 `[Touch] Photo saved: /root/photos/snapshot_....jpg`，照片以当前最新 JPEG 保存到 `/root/photos`。触摸其他区域不拍照；没有首帧时输出 `no camera frame is available`。网页截图仍返回并保存到同一目录。
 
 浏览器访问 `http://板卡IPv4地址:8080/`。以下是接口约定：
 
@@ -301,15 +329,19 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 | 现象或日志 | 排查步骤 |
 | --- | --- |
 | `opencv4` pkg-config 找不到 | 确认本机 OpenCV 开发文件和 `opencv4.pc` 已安装；自定义安装时配置 `PKG_CONFIG_PATH` |
-| 交叉编译器不存在 | 加载板卡 SDK 环境或指定 `CXX`；不要用本机 g++ 编译 ARM 产物 |
+| 交叉编译器不存在 | 检查 `BUILDROOT_SDK` 路径和 SDK 的 `bin/arm-buildroot-linux-gnueabihf-g++`；不要用本机 g++ 或不匹配的 Ubuntu ARM 工具链编译板端产物 |
+| 找不到 OpenCV 头文件或库 | 检查 `OPENCV_ARM` 是否指向 ARM OpenCV 安装前缀，确认其中有 `include/opencv4/` 和 `lib/`，并确认库与编译器 ABI 匹配 |
 | 板端 `Exec format error` | 用 `file` 检查是否误部署了 `build/cam_server`，同时核对目标架构 |
 | 程序存在却报告 `not found` / 缺少共享库 | 核对动态加载器、浮点 ABI、C 库和 OpenCV；板端如有 `ldd` 可检查依赖 |
 | 摄像头无法打开 / 不支持 YUYV | 检查 `ls -l /dev/video*`、设备权限和占用；如有 v4l2-ctl，执行 `v4l2-ctl -d /dev/video1 --list-formats-ext` |
 | 持续短帧或坏帧日志 | 检查驱动协商结果、USB/摄像头链路和内核日志；当前会丢帧，不会自动修复驱动 |
 | LCD 无法打开 / 模式不支持 | 检查 `ls -l /dev/fb*`；如有 fbset，执行 `fbset -fb /dev/fb0 -i`；核对位深、真彩色位域和 BSP |
 | LCD 黑屏、文字覆盖或撕裂 | 核对背光、面板时序、fbcon 和其他显存写入者；撕裂可能来自当前单页面刷新方式 |
+| LCD 无 `PHOTO` 按钮或无触摸日志 | 先确认运行的是重新编译并复制到板端的 ARM 二进制：`strings ./cam_server_arm | grep 'PHOTO button'` 应能找到按钮日志文本。启动日志必须出现 `[LCD] PHOTO button x=...`，否则检查 LCD 是否成功打开。随后检查 `/dev/input/event*`、触摸权限和 `evtest` 是否能看到按下/释放；必要时用 `--touch PATH` 指定正确节点 |
+| 触摸位置偏移或上下颠倒 | 对照 `EVIOCGABS` 范围和 framebuffer 分辨率，检查 BSP 旋转/坐标变换；程序只做线性归一化，不做旋转校准 |
 | HTTP 绑定失败 / 网页无法访问 | 查看端口是否占用，核对板卡 IP、同网段连通性和防火墙；启动成功日志不代表外部网络可达 |
 | 截图 503 / 507 / 500 | 依次检查是否已采集首帧、是否达到 100 张、目录父路径/权限/磁盘空间；`df -h` 可查看存储 |
+| 触摸按钮点击但没有文件 | 检查首帧是否已生成、`/root/photos` 权限和磁盘空间；查看 `[Touch] Photo rejected/failed` 日志 |
 | 帧率偏低 | 比较 `--no-lcd` 模式，检查 CPU 和网络；降低采集尺寸或 JPEG 质量做实测，程序没有 FPS 设定选项 |
 | HTTP 测试 `Operation not permitted` | 环境禁止创建 socket；转到允许本地 TCP 的环境运行，不能计为测试通过 |
 
@@ -317,9 +349,9 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 
 ### 4.7 测试证据与上板验收
 
-本次完善技术文档与函数注释，核对了源码和参数帮助，并执行 `make -B cam_server test_video test_v4l2 build/test_http_server`：主程序与三组测试均编译成功，视频测试和模拟 V4L2 测试运行通过。使用 `g++ -E -P` 比较全部 8 个 C++ 源文件在注释修改前后的 SHA-256，结果完全一致，确认仅修改注释而未改变程序代码。
+本次加入触摸输入、LCD `PHOTO` 拍照按钮和共享照片保存入口；视频回归测试还验证了按钮立即绘制、按钮几何和命中区域。执行 `make -B cam_server test_video test_v4l2 build/test_http_server` 后，主程序与三组测试均编译成功，视频测试和模拟 V4L2 测试运行通过；`./build/cam_server --help` 已确认显示 `/root/photos`、`--touch` 和 `--no-touch`。另外执行 `make -B -f Makefile.arm cam_server_arm` 已使用固定 SDK/OpenCV 路径生成 ARM ELF；触摸真实事件、LCD 显示和板端照片写入仍需上板验证。
 
-HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。环境中没有摄像头、LCD、ARM SDK 和目标 OpenCV；ARM 构建、真实显示与长时间运行仍待上板验证。
+HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 构建已完成，真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
 
 | 上板验收项 | 预期结果 |
 | --- | --- |
@@ -330,5 +362,6 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 | 设备故障 | 摄像头拔出并被驱动报告为错误时返回非零；只报告超时的驱动可能继续等待 |
 | 长时间运行 | 记录板卡型号、BSP、摄像头、位深、参数、运行时长、CPU/内存、实际帧率和异常日志 |
 | 多客户端与配额 | 慢客户端不长期占用帧锁；超过连接上限返回 503；截图配额满返回 507 |
+| 触摸拍照 | 点击 LCD `PHOTO` 按钮生成一张 `/root/photos/snapshot_*.jpg`，重复点击产生不同递增序号；启动时可用 `[LCD] PHOTO button ...` 日志核对按钮几何位置 |
 
 性能和稳定性数据需保留实测记录后再补充，当前没有固定帧率、延迟或持续运行时长的达标承诺。

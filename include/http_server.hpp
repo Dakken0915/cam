@@ -13,6 +13,13 @@
 
 class HttpServer {
 public:
+    enum class SnapshotResult {
+        Saved,
+        NoFrame,
+        StorageFull,
+        IoError
+    };
+
     /**
      * @brief  Configure snapshot storage and HTTP resource limits.
      * @param  [in] snapshotDir Snapshot directory; its parent directory must exist.
@@ -47,15 +54,18 @@ public:
      * @note   Thread-safe; empty input is ignored and valid input increments the frame sequence.
      */
     void updateFrame(const std::vector<uint8_t>& jpeg);
+    /**
+     * @brief  Save the latest JPEG in the configured photo directory for a local trigger.
+     * @param  [out] path Saved file path when the operation succeeds.
+     * @retval Saved The JPEG was written successfully.
+     * @retval NoFrame No camera JPEG is available yet.
+     * @retval StorageFull The configured snapshot count has been reached.
+     * @retval IoError The directory or file could not be written.
+     * @note   This is shared by the touchscreen and HTTP snapshot paths.
+     */
+    SnapshotResult captureSnapshot(std::string& path);
 
 private:
-    enum class SnapshotResult {
-        Saved,
-        NoFrame,
-        StorageFull,
-        IoError
-    };
-
     /**
      * @brief  Accept clients, enforce the connection limit, and track handler lifetimes.
      */

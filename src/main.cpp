@@ -11,6 +11,7 @@
 #include "v4l2.hpp"
 #include "jpeg_encoder.hpp"
 #include "framebuffer.hpp"
+#include "touchscreen.hpp"
 #include "http_server.hpp"
 #include "frame.hpp"
 #include "bounded_queue.hpp"
@@ -22,13 +23,16 @@ volatile sig_atomic_t signalRunning = 1;
 struct Options {
     std::string device = "/dev/video1";
     std::string framebuffer = "/dev/fb0";
-    std::string snapshots = "./snapshots";
+    std::string snapshots = "/root/photos";
+    std::string touchDevice;
     int width = 640;
     int height = 480;
     int port = 8080;
     int quality = 80;
     bool lcdEnabled = true;
     bool lcdRequired = false;
+    bool touchEnabled = true;
+    bool touchRequired = false;
     bool help = false;
 };
 
@@ -97,6 +101,8 @@ Options parseOptions(int argc, char** argv) {
         {"port", required_argument, nullptr, 'p'},
         {"quality", required_argument, nullptr, 'q'},
         {"snapshot-dir", required_argument, nullptr, 's'},
+        {"touch", required_argument, nullptr, 't'},
+        {"no-touch", no_argument, nullptr, 'T'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
@@ -111,13 +117,17 @@ Options parseOptions(int argc, char** argv) {
         case 'p': result.port = parseNumber(optarg, 1, 65535); break;
         case 'q': result.quality = parseNumber(optarg, 1, 100); break;
         case 's': result.snapshots = optarg; break;
+        case 't': result.touchDevice = optarg; result.touchRequired = true; break;
+        case 'T': result.touchEnabled = false; break;
         case 'h': result.help = true; break;
         default: throw std::invalid_argument("Unknown or incomplete option; use --help");
         }
     }
     if (optind != argc || result.width % 2 ||
-        (!result.lcdEnabled && result.lcdRequired))
-        throw std::invalid_argument("Unexpected arguments, odd YUYV width, or --fb with --no-lcd");
+        (!result.lcdEnabled && result.lcdRequired) ||
+        (!result.lcdEnabled && result.touchRequired) ||
+        (!result.touchEnabled && result.touchRequired))
+        throw std::invalid_argument("Unexpected arguments, odd YUYV width, or conflicting LCD/touch options");
     return result;
 }
 
@@ -133,7 +143,9 @@ void printHelp() {
               << "  --no-lcd            Disable LCD output\n"
               << "  --port N            HTTP port (default 8080)\n"
               << "  --quality N         JPEG quality 1..100 (default 80)\n"
-              << "  --snapshot-dir PATH Snapshot storage (default ./snapshots)\n"
+              << "  --snapshot-dir PATH Snapshot storage (default /root/photos)\n"
+              << "  --touch PATH        Require this evdev touchscreen (default auto-detect)\n"
+              << "  --no-touch          Disable the LCD touch button\n"
               << "  --help              Show this help\n";
 }
 
@@ -208,6 +220,38 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
 }
 
 /**
+ * @brief  Wait for LCD touch releases and save a photo when the button is tapped.
+ * @param  [in,out] touch Open evdev touchscreen reader.
+ * @param  [in] display LCD display exposing the button hit area.
+ * @param  [in,out] server Snapshot service receiving the current JPEG.
+ * @param  [in,out] state Shared failure and shutdown state.
+ * @note   A tap before the first encoded frame reports NoFrame and does not create a file.
+ */
+void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
+               HttpServer& server, PipelineState& state) {
+    try {
+        while (signalRunning && !state.stop) {
+            TouchPoint point;
+            if (!touch.waitForTap(point, 250)) continue;
+            if (!display.isPhotoButton(point.x, point.y)) continue;
+            std::string path;
+            const HttpServer::SnapshotResult result = server.captureSnapshot(path);
+            if (result == HttpServer::SnapshotResult::Saved) {
+                std::cout << "[Touch] Photo saved: " << path << '\n';
+            } else if (result == HttpServer::SnapshotResult::NoFrame) {
+                std::cerr << "[Touch] Photo ignored: no camera frame is available\n";
+            } else if (result == HttpServer::SnapshotResult::StorageFull) {
+                std::cerr << "[Touch] Photo rejected: photo quota is full\n";
+            } else {
+                std::cerr << "[Touch] Photo failed: cannot write photo directory\n";
+            }
+        }
+    } catch (const std::exception& error) {
+        state.fail(error.what());
+    }
+}
+
+/**
  * @brief  Start the camera, LCD, and HTTP pipeline and coordinate cleanup.
  * @param  [in] options Validated runtime configuration.
  * @retval 0 The pipeline shut down without a recorded failure.
@@ -228,15 +272,39 @@ int run(const Options& options) {
     HttpServer server(options.snapshots);
     if (!server.start(options.port)) return 1;
 
+    Touchscreen touch;
+    bool touchActive = false;
+    if (options.touchEnabled && lcdActive) {
+        touchActive = touch.open(options.touchDevice);
+        if (touchActive) {
+            const PhotoButton button = display.photoButton();
+            touch.setScreenSize(button.x + button.width > 0 ?
+                                button.x + button.width + 20 : 1,
+                                button.y + button.height > 0 ?
+                                button.y + button.height + 20 : 1);
+        } else if (options.touchRequired) {
+            std::cerr << "[Touch] Required touchscreen could not be opened\n";
+            server.stop();
+            capture.stop();
+            return 1;
+        } else {
+            std::cerr << "[Touch] No touchscreen found; LCD photo button is inactive\n";
+        }
+    }
+
     BoundedQueue<Frame> raw(3);
     BoundedQueue<Frame> jpeg(3);
     PipelineState state;
     std::thread captureThread;
     std::thread encodeThread;
+    std::thread touchThread;
     try {
         captureThread = std::thread(captureLoop, std::ref(capture), std::ref(raw), std::ref(state));
         encodeThread = std::thread(encodeLoop, std::ref(raw), std::ref(jpeg),
             std::ref(display), lcdActive, options.quality, std::ref(state));
+        if (touchActive)
+            touchThread = std::thread(touchLoop, std::ref(touch), std::cref(display),
+                                      std::ref(server), std::ref(state));
         Frame encoded;
         while (jpeg.take(encoded)) server.updateFrame(encoded.data);
     } catch (const std::exception& error) {
@@ -247,6 +315,7 @@ int run(const Options& options) {
     jpeg.close();
     if (captureThread.joinable()) captureThread.join();
     if (encodeThread.joinable()) encodeThread.join();
+    if (touchThread.joinable()) touchThread.join();
     server.stop();
     capture.stop();
     return state.failed ? 1 : 0;

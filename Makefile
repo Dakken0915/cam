@@ -10,7 +10,7 @@ CXXFLAGS += -I ./include
 SRC_DIR = src
 OBJ_DIR   = build
 
-COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp
+COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server: $(OBJ_DIR)/cam_server

@@ -70,6 +70,43 @@ void testSurface(int bits, bool swapRedBlue = false) {
 }
 
 /**
+ * @brief  Verify that the LCD photo button is drawn immediately and has a usable hit area.
+ */
+void testPhotoButton() {
+    fb_var_screeninfo variable{};
+    variable.xres = 240;
+    variable.yres = 120;
+    variable.xres_virtual = variable.xres;
+    variable.yres_virtual = variable.yres;
+    variable.bits_per_pixel = 32;
+    variable.red = fb_bitfield{16, 8, 0};
+    variable.green = fb_bitfield{8, 8, 0};
+    variable.blue = fb_bitfield{0, 8, 0};
+    variable.transp = fb_bitfield{24, 8, 0};
+    fb_fix_screeninfo fixed{};
+    fixed.type = FB_TYPE_PACKED_PIXELS;
+    fixed.visual = FB_VISUAL_TRUECOLOR;
+    fixed.line_length = variable.xres * 4;
+    fixed.smem_len = fixed.line_length * variable.yres;
+    std::vector<uint8_t> memory(fixed.smem_len, 0);
+    FramebufferSurface surface;
+    require(surface.configure(memory.data(), memory.size(), fixed, variable),
+            "photo button surface rejected");
+    require(surface.renderPhotoButton(), "photo button was not drawn");
+    const PhotoButton button = surface.photoButton();
+    require(button.x == 0 && button.y == 20 && button.width == 220 && button.height == 80,
+            "unexpected photo button geometry");
+    require(surface.isPhotoButton(button.x + 10, button.y + 10),
+            "photo button hit test rejected an interior point");
+    require(!surface.isPhotoButton(button.x - 1, button.y + 10),
+            "photo button hit test accepted an exterior point");
+    uint32_t topLeft = 0;
+    std::memcpy(&topLeft, memory.data() + static_cast<size_t>(button.y) * fixed.line_length,
+                sizeof(topLeft));
+    require(topLeft == 0xffffffffu, "photo button border was not rendered");
+}
+
+/**
  * @brief  Check padded YUYV conversion, JPEG decoding, and invalid encoder inputs.
  */
 void testEncoder() {
@@ -134,6 +171,7 @@ int main() {
         testSurface(32);
         testSurface(16, true);
         testSurface(32, true);
+        testPhotoButton();
         testEncoder();
         testQueue();
         std::cout << "Video pipeline tests passed\n";

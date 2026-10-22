@@ -144,7 +144,164 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
             std::memcpy(destination + x * bytes, &pixel, bytes);
         }
     }
+    drawPhotoButton();
     return true;
+}
+
+/**
+ * @brief  Draw the LCD photo button without replacing the camera frame.
+ * @retval true The button was drawn on a configured surface.
+ * @retval false The surface is unavailable or too small for a button.
+ */
+bool FramebufferSurface::renderPhotoButton() {
+    const PhotoButton button = photoButton();
+    if (button.width <= 0 || button.height <= 0) return false;
+    drawPhotoButton();
+    return true;
+}
+
+/**
+ * @brief  Return a fixed-size photo button anchored at the lower-right corner.
+ * @retval PhotoButton Button geometry in visible screen coordinates.
+ * @note   Very small test surfaces do not expose a button.
+ */
+PhotoButton FramebufferSurface::photoButton() const {
+    const int screenWidth = static_cast<int>(variable_.xres);
+    const int screenHeight = static_cast<int>(variable_.yres);
+    if (!memory_ || screenWidth < 80 || screenHeight < 40) return {};
+    PhotoButton button;
+    button.width = std::min(220, screenWidth - 20);
+    button.height = std::min(80, screenHeight - 20);
+    button.x = screenWidth - button.width - 20;
+    button.y = screenHeight - button.height - 20;
+    return button;
+}
+
+/**
+ * @brief  Check whether a screen point falls inside the photo button.
+ * @param  [in] x Horizontal screen coordinate.
+ * @param  [in] y Vertical screen coordinate.
+ * @retval true The point is within the button rectangle.
+ * @retval false The point is outside or the surface has no button.
+ */
+bool FramebufferSurface::isPhotoButton(int x, int y) const {
+    const PhotoButton button = photoButton();
+    return button.width > 0 && x >= button.x && x < button.x + button.width &&
+           y >= button.y && y < button.y + button.height;
+}
+
+/**
+ * @brief  Pack an RGB color into the configured framebuffer pixel format.
+ * @param  [in] blue Blue channel intensity.
+ * @param  [in] green Green channel intensity.
+ * @param  [in] red Red channel intensity.
+ * @retval uint32_t Packed pixel value.
+ */
+uint32_t FramebufferSurface::packPixel(uint8_t blue, uint8_t green, uint8_t red) const {
+    return alpha_ | redTable_[red] | greenTable_[green] | blueTable_[blue];
+}
+
+/**
+ * @brief  Write one packed pixel inside the visible framebuffer area.
+ * @param  [in] x Horizontal visible coordinate.
+ * @param  [in] y Vertical visible coordinate.
+ * @param  [in] pixel Packed framebuffer pixel.
+ */
+void FramebufferSurface::writePixel(int x, int y, uint32_t pixel) {
+    const PhotoButton screen = {0, 0, static_cast<int>(variable_.xres),
+                                static_cast<int>(variable_.yres)};
+    if (!memory_ || x < screen.x || y < screen.y || x >= screen.width || y >= screen.height)
+        return;
+    const size_t bytes = variable_.bits_per_pixel / 8;
+    uint8_t* destination = memory_ +
+        (static_cast<size_t>(variable_.yoffset) + y) * fixed_.line_length +
+        (static_cast<size_t>(variable_.xoffset) + x) * bytes;
+    std::memcpy(destination, &pixel, bytes);
+}
+
+/**
+ * @brief  Draw one bitmap letter using a compact five-by-seven font.
+ * @param  [in] glyph Letter to draw; PHOTO letters are supported.
+ * @param  [in] x Left coordinate of the glyph.
+ * @param  [in] y Top coordinate of the glyph.
+ * @param  [in] scale Pixel scale for the glyph bitmap.
+ * @param  [in] color Packed framebuffer color.
+ * @note   Unsupported letters are ignored so the button remains usable.
+ */
+void FramebufferSurface::drawGlyph(char glyph, int x, int y, int scale, uint32_t color) {
+    static const uint8_t p[] = {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10};
+    static const uint8_t h[] = {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
+    static const uint8_t o[] = {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
+    static const uint8_t t[] = {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    const uint8_t* rows = nullptr;
+    switch (glyph) {
+    case 'P': rows = p; break;
+    case 'H': rows = h; break;
+    case 'O': rows = o; break;
+    case 'T': rows = t; break;
+    default: return;
+    }
+    if (scale <= 0) return;
+    for (int row = 0; row < 7; ++row) {
+        for (int column = 0; column < 5; ++column) {
+            if (!(rows[row] & (1u << (4 - column)))) continue;
+            for (int yy = 0; yy < scale; ++yy) {
+                for (int xx = 0; xx < scale; ++xx)
+                    writePixel(x + column * scale + xx, y + row * scale + yy, color);
+            }
+        }
+    }
+}
+
+/**
+ * @brief  Draw a colored camera icon and PHOTO button over the current LCD frame.
+ * @note   The overlay is written only to the framebuffer and is not included in JPEG output.
+ */
+void FramebufferSurface::drawPhotoButton() {
+    const PhotoButton button = photoButton();
+    if (button.width <= 0) return;
+    const uint32_t background = packPixel(24, 105, 168);
+    const uint32_t border = packPixel(255, 255, 255);
+    const uint32_t lens = packPixel(20, 20, 20);
+    for (int y = button.y; y < button.y + button.height; ++y) {
+        for (int x = button.x; x < button.x + button.width; ++x) {
+            const bool edge = x == button.x || y == button.y ||
+                              x == button.x + button.width - 1 ||
+                              y == button.y + button.height - 1;
+            writePixel(x, y, edge ? border : background);
+        }
+    }
+    const char* label = "PHOTO";
+    const bool showLabel = button.width >= 160;
+    const int scale = button.width >= 200 ? 3 : 2;
+    const int labelWidth = 5 * 6 * scale;
+    const int iconCenterX = showLabel ? button.x + button.width / 4 :
+                            button.x + button.width / 2;
+    const int iconX = iconCenterX - 30;
+    const int iconY = button.y + button.height / 2 - 18;
+    for (int y = iconY; y < iconY + 36; ++y) {
+        for (int x = iconX; x < iconX + 60; ++x) {
+            const bool body = x >= iconX && x < iconX + 60 && y >= iconY + 8 && y < iconY + 34;
+            const bool top = x >= iconX + 12 && x < iconX + 28 && y >= iconY && y < iconY + 10;
+            if (body || top) writePixel(x, y, border);
+        }
+    }
+    const int centerX = iconX + 30;
+    const int centerY = iconY + 21;
+    for (int y = centerY - 10; y <= centerY + 10; ++y) {
+        for (int x = centerX - 10; x <= centerX + 10; ++x) {
+            if ((x - centerX) * (x - centerX) + (y - centerY) * (y - centerY) <= 100)
+                writePixel(x, y, lens);
+        }
+    }
+    if (showLabel) {
+        int textX = button.x + button.width - labelWidth - 8;
+        const int textY = button.y + (button.height - 7 * scale) / 2;
+        for (int index = 0; label[index] != '\0'; ++index) {
+            drawGlyph(label[index], textX, textY, scale, border);
+            textX += 6 * scale;
+        }
+    }
 }
 
 /**
@@ -194,6 +351,10 @@ bool FramebufferDisplay::open(const std::string& device) {
     }
     std::cout << "[LCD] " << device << ' ' << variable.xres << 'x' << variable.yres
               << ' ' << variable.bits_per_pixel << " bpp, stride=" << fixed.line_length << '\n';
+    const PhotoButton button = surface_.photoButton();
+    std::cout << "[LCD] PHOTO button x=" << button.x << " y=" << button.y
+              << " w=" << button.width << " h=" << button.height << '\n';
+    surface_.renderPhotoButton();
     return true;
 }
 
@@ -206,6 +367,25 @@ bool FramebufferDisplay::open(const std::string& device) {
  */
 bool FramebufferDisplay::render(const cv::Mat& bgr) {
     return surface_.render(bgr);
+}
+
+/**
+ * @brief  Return the photo button rectangle in framebuffer coordinates.
+ * @retval PhotoButton Current button geometry, or zero dimensions if unavailable.
+ */
+PhotoButton FramebufferDisplay::photoButton() const {
+    return surface_.photoButton();
+}
+
+/**
+ * @brief  Check whether a framebuffer coordinate activates the photo button.
+ * @param  [in] x Horizontal framebuffer coordinate.
+ * @param  [in] y Vertical framebuffer coordinate.
+ * @retval true The coordinate is inside the button.
+ * @retval false The coordinate is outside the button or the device is unopened.
+ */
+bool FramebufferDisplay::isPhotoButton(int x, int y) const {
+    return surface_.isPhotoButton(x, y);
 }
 
 /**

@@ -7,6 +7,13 @@
 #include <linux/fb.h>
 #include <opencv2/core.hpp>
 
+struct PhotoButton {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+};
+
 // Borrowed display memory also supports rendering tests without LCD hardware.
 class FramebufferSurface {
 public:
@@ -31,6 +38,25 @@ public:
      */
     bool render(const cv::Mat& bgr);
     /**
+     * @brief  Draw the LCD photo button without replacing the camera frame.
+     * @retval true The button was drawn on a configured surface.
+     * @retval false The surface is unavailable or too small for a button.
+     */
+    bool renderPhotoButton();
+    /**
+     * @brief  Return the LCD photo button rectangle.
+     * @retval PhotoButton Screen coordinates and dimensions; zero dimensions mean unavailable.
+     */
+    PhotoButton photoButton() const;
+    /**
+     * @brief  Test whether a screen coordinate is inside the photo button.
+     * @param  [in] x Horizontal screen coordinate.
+     * @param  [in] y Vertical screen coordinate.
+     * @retval true The coordinate is inside the button.
+     * @retval false The coordinate is outside or the button is unavailable.
+     */
+    bool isPhotoButton(int x, int y) const;
+    /**
      * @brief  Unbind borrowed memory and release the scaling cache.
      * @note   Does not free the caller's memory or clear the display.
      */
@@ -47,6 +73,11 @@ private:
     uint32_t alpha_ = 0;
     int sourceWidth_ = 0;
     int sourceHeight_ = 0;
+
+    uint32_t packPixel(uint8_t blue, uint8_t green, uint8_t red) const;
+    void drawPhotoButton();
+    void drawGlyph(char glyph, int x, int y, int scale, uint32_t color);
+    void writePixel(int x, int y, uint32_t pixel);
 };
 
 class FramebufferDisplay {
@@ -84,6 +115,19 @@ public:
      * @note   OpenCV rendering errors propagate to the caller.
      */
     bool render(const cv::Mat& bgr);
+    /**
+     * @brief  Return the photo button rectangle in framebuffer coordinates.
+     * @retval PhotoButton Current button geometry, or zero dimensions if unavailable.
+     */
+    PhotoButton photoButton() const;
+    /**
+     * @brief  Check whether a framebuffer coordinate activates the photo button.
+     * @param  [in] x Horizontal framebuffer coordinate.
+     * @param  [in] y Vertical framebuffer coordinate.
+     * @retval true The coordinate is inside the button.
+     * @retval false The coordinate is outside the button or the device is unopened.
+     */
+    bool isPhotoButton(int x, int y) const;
     /**
      * @brief  Unbind and unmap display memory, then close the device.
      * @note   Safe to call repeatedly; does not clear the screen or restore its previous contents.

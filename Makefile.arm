@@ -1,16 +1,23 @@
 # 使用 IMX6ULL Buildroot SDK 交叉编译
-CXX      = arm-buildroot-linux-gnueabihf-g++
+PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+BUILDROOT_SDK ?= $(abspath $(PROJECT_DIR)/../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot)
+ifeq ($(origin CXX),default)
+CXX := $(BUILDROOT_SDK)/bin/arm-buildroot-linux-gnueabihf-g++
+endif
+ifeq ($(wildcard $(CXX)),)
+$(error ARM 编译器不存在: $(CXX)；请检查 BUILDROOT_SDK 或指定兼容的 CXX)
+endif
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -g -Iinclude
 
-OPENCV_ARM = $(HOME)/opencv_arm_install
+OPENCV_ARM ?= $(abspath $(PROJECT_DIR)/../../opencv_arm_buildroot_install)
 CXXFLAGS += -I$(OPENCV_ARM)/include/opencv4
 LDFLAGS  = -L$(OPENCV_ARM)/lib
 LDFLAGS  += -lopencv_core -lopencv_imgproc -lopencv_imgcodecs -lpthread
 
 SRC_DIR = src
-OBJ_DIR = build_arm
+OBJ_DIR ?= build_arm
 
-COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp
+COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server_arm: $(OBJ_DIR)/cam_server_arm
