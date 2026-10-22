@@ -161,33 +161,49 @@ bool FramebufferSurface::renderPhotoButton() {
 }
 
 /**
- * @brief  Return a fixed-size photo button anchored at the lower-right corner.
+ * @brief  Return the configured visible framebuffer dimensions.
+ * @retval pair<int, int> Width and height in screen pixels; both are zero when unconfigured.
+ */
+std::pair<int, int> FramebufferSurface::screenSize() const {
+    if (!memory_) return {0, 0};
+    return {static_cast<int>(variable_.xres), static_cast<int>(variable_.yres)};
+}
+
+/**
+ * @brief  Return a small circular photo button anchored at the lower-right corner.
  * @retval PhotoButton Button geometry in visible screen coordinates.
- * @note   Very small test surfaces do not expose a button.
+ * @note   The returned square bounds the circular hit area; very small surfaces do not expose a button.
  */
 PhotoButton FramebufferSurface::photoButton() const {
     const int screenWidth = static_cast<int>(variable_.xres);
     const int screenHeight = static_cast<int>(variable_.yres);
-    if (!memory_ || screenWidth < 80 || screenHeight < 40) return {};
+    if (!memory_ || screenWidth < 64 || screenHeight < 64) return {};
     PhotoButton button;
-    button.width = std::min(220, screenWidth - 20);
-    button.height = std::min(80, screenHeight - 20);
-    button.x = screenWidth - button.width - 20;
-    button.y = screenHeight - button.height - 20;
+    const int diameter = std::min(80, std::min(screenWidth - 40, screenHeight - 40));
+    if (diameter < 40) return {};
+    button.width = diameter;
+    button.height = diameter;
+    button.x = screenWidth - button.width - 24;
+    button.y = screenHeight - button.height - 24;
     return button;
 }
 
 /**
- * @brief  Check whether a screen point falls inside the photo button.
+ * @brief  Check whether a screen point falls inside the circular photo button.
  * @param  [in] x Horizontal screen coordinate.
  * @param  [in] y Vertical screen coordinate.
- * @retval true The point is within the button rectangle.
+ * @retval true The point is within the circular button.
  * @retval false The point is outside or the surface has no button.
  */
 bool FramebufferSurface::isPhotoButton(int x, int y) const {
     const PhotoButton button = photoButton();
-    return button.width > 0 && x >= button.x && x < button.x + button.width &&
-           y >= button.y && y < button.y + button.height;
+    if (button.width <= 0 || button.height <= 0) return false;
+    const int centerX = button.x + button.width / 2;
+    const int centerY = button.y + button.height / 2;
+    const int radius = button.width / 2;
+    const int dx = x - centerX;
+    const int dy = y - centerY;
+    return dx * dx + dy * dy <= radius * radius;
 }
 
 /**
@@ -220,86 +236,30 @@ void FramebufferSurface::writePixel(int x, int y, uint32_t pixel) {
 }
 
 /**
- * @brief  Draw one bitmap letter using a compact five-by-seven font.
- * @param  [in] glyph Letter to draw; PHOTO letters are supported.
- * @param  [in] x Left coordinate of the glyph.
- * @param  [in] y Top coordinate of the glyph.
- * @param  [in] scale Pixel scale for the glyph bitmap.
- * @param  [in] color Packed framebuffer color.
- * @note   Unsupported letters are ignored so the button remains usable.
- */
-void FramebufferSurface::drawGlyph(char glyph, int x, int y, int scale, uint32_t color) {
-    static const uint8_t p[] = {0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10};
-    static const uint8_t h[] = {0x11, 0x11, 0x11, 0x1f, 0x11, 0x11, 0x11};
-    static const uint8_t o[] = {0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e};
-    static const uint8_t t[] = {0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
-    const uint8_t* rows = nullptr;
-    switch (glyph) {
-    case 'P': rows = p; break;
-    case 'H': rows = h; break;
-    case 'O': rows = o; break;
-    case 'T': rows = t; break;
-    default: return;
-    }
-    if (scale <= 0) return;
-    for (int row = 0; row < 7; ++row) {
-        for (int column = 0; column < 5; ++column) {
-            if (!(rows[row] & (1u << (4 - column)))) continue;
-            for (int yy = 0; yy < scale; ++yy) {
-                for (int xx = 0; xx < scale; ++xx)
-                    writePixel(x + column * scale + xx, y + row * scale + yy, color);
-            }
-        }
-    }
-}
-
-/**
- * @brief  Draw a colored camera icon and PHOTO button over the current LCD frame.
+ * @brief  Draw a compact white circular photo button over the current LCD frame.
  * @note   The overlay is written only to the framebuffer and is not included in JPEG output.
  */
 void FramebufferSurface::drawPhotoButton() {
     const PhotoButton button = photoButton();
     if (button.width <= 0) return;
-    const uint32_t background = packPixel(24, 105, 168);
-    const uint32_t border = packPixel(255, 255, 255);
-    const uint32_t lens = packPixel(20, 20, 20);
+    const uint32_t white = packPixel(255, 255, 255);
+    const uint32_t black = packPixel(0, 0, 0);
+    const int centerX = button.x + button.width / 2;
+    const int centerY = button.y + button.height / 2;
+    const int outerRadius = button.width / 2 - 1;
+    const int gapRadius = std::max(1, outerRadius - 5);
+    const int innerRadius = std::max(1, outerRadius - 9);
     for (int y = button.y; y < button.y + button.height; ++y) {
         for (int x = button.x; x < button.x + button.width; ++x) {
-            const bool edge = x == button.x || y == button.y ||
-                              x == button.x + button.width - 1 ||
-                              y == button.y + button.height - 1;
-            writePixel(x, y, edge ? border : background);
-        }
-    }
-    const char* label = "PHOTO";
-    const bool showLabel = button.width >= 160;
-    const int scale = button.width >= 200 ? 3 : 2;
-    const int labelWidth = 5 * 6 * scale;
-    const int iconCenterX = showLabel ? button.x + button.width / 4 :
-                            button.x + button.width / 2;
-    const int iconX = iconCenterX - 30;
-    const int iconY = button.y + button.height / 2 - 18;
-    for (int y = iconY; y < iconY + 36; ++y) {
-        for (int x = iconX; x < iconX + 60; ++x) {
-            const bool body = x >= iconX && x < iconX + 60 && y >= iconY + 8 && y < iconY + 34;
-            const bool top = x >= iconX + 12 && x < iconX + 28 && y >= iconY && y < iconY + 10;
-            if (body || top) writePixel(x, y, border);
-        }
-    }
-    const int centerX = iconX + 30;
-    const int centerY = iconY + 21;
-    for (int y = centerY - 10; y <= centerY + 10; ++y) {
-        for (int x = centerX - 10; x <= centerX + 10; ++x) {
-            if ((x - centerX) * (x - centerX) + (y - centerY) * (y - centerY) <= 100)
-                writePixel(x, y, lens);
-        }
-    }
-    if (showLabel) {
-        int textX = button.x + button.width - labelWidth - 8;
-        const int textY = button.y + (button.height - 7 * scale) / 2;
-        for (int index = 0; label[index] != '\0'; ++index) {
-            drawGlyph(label[index], textX, textY, scale, border);
-            textX += 6 * scale;
+            const int dx = x - centerX;
+            const int dy = y - centerY;
+            const int distanceSquared = dx * dx + dy * dy;
+            if (distanceSquared <= outerRadius * outerRadius)
+                writePixel(x, y, white);
+            if (distanceSquared <= gapRadius * gapRadius)
+                writePixel(x, y, black);
+            if (distanceSquared <= innerRadius * innerRadius)
+                writePixel(x, y, white);
         }
     }
 }
@@ -367,6 +327,14 @@ bool FramebufferDisplay::open(const std::string& device) {
  */
 bool FramebufferDisplay::render(const cv::Mat& bgr) {
     return surface_.render(bgr);
+}
+
+/**
+ * @brief  Return the visible framebuffer dimensions used for touch normalization.
+ * @retval pair<int, int> Width and height in screen pixels; both are zero when unopened.
+ */
+std::pair<int, int> FramebufferDisplay::screenSize() const {
+    return surface_.screenSize();
 }
 
 /**

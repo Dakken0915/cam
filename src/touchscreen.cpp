@@ -57,7 +57,12 @@ Touchscreen::~Touchscreen() {
  */
 bool Touchscreen::open(const std::string& device) {
     close();
-    if (!device.empty()) return openCandidate(device);
+    if (!device.empty()) {
+        if (openCandidate(device)) return true;
+        std::cerr << "[Touch] Cannot use " << device
+                  << ": expected BTN_TOUCH/BTN_LEFT or ABS_MT_TRACKING_ID with absolute X/Y\n";
+        return false;
+    }
 
     DIR* directory = opendir("/dev/input");
     if (!directory) return false;
@@ -76,7 +81,7 @@ bool Touchscreen::open(const std::string& device) {
 /**
  * @brief  Open and validate one event device candidate.
  * @param  [in] path Candidate event device path.
- * @retval true The device exposes touch keys and absolute X/Y axes.
+ * @retval true The device exposes touch keys or tracking IDs and absolute X/Y axes.
  * @retval false The device is unavailable or lacks the required capabilities.
  */
 bool Touchscreen::openCandidate(const std::string& path) {
@@ -87,15 +92,23 @@ bool Touchscreen::openCandidate(const std::string& path) {
     unsigned long absBits[(ABS_MAX + 1 + sizeof(unsigned long) * 8 - 1) /
                           (sizeof(unsigned long) * 8)]{};
     if (ioctl(descriptor, EVIOCGBIT(EV_KEY, sizeof(keyBits)), keyBits) < 0 ||
-        ioctl(descriptor, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) < 0 ||
-        !(hasBit(keyBits, BTN_TOUCH) || hasBit(keyBits, BTN_LEFT)) ||
+        ioctl(descriptor, EVIOCGBIT(EV_ABS, sizeof(absBits)), absBits) < 0) {
+        ::close(descriptor);
+        return false;
+    }
+    const bool hasTouchKey = hasBit(keyBits, BTN_TOUCH) || hasBit(keyBits, BTN_LEFT);
+    const bool hasTrackingId = hasBit(absBits, ABS_MT_TRACKING_ID);
+    if ((!hasTouchKey && !hasTrackingId) ||
         !(hasBit(absBits, ABS_X) || hasBit(absBits, ABS_MT_POSITION_X)) ||
         !(hasBit(absBits, ABS_Y) || hasBit(absBits, ABS_MT_POSITION_Y))) {
         ::close(descriptor);
         return false;
     }
-    const int xCode = hasBit(absBits, ABS_X) ? ABS_X : ABS_MT_POSITION_X;
-    const int yCode = hasBit(absBits, ABS_Y) ? ABS_Y : ABS_MT_POSITION_Y;
+    // Prefer multitouch axes when both axis families are advertised; some BSPs
+    // leave legacy ABS_X/ABS_Y ranges at 800x480 while reporting 1024x600 data
+    // through ABS_MT_POSITION_X/ABS_MT_POSITION_Y.
+    const int xCode = hasBit(absBits, ABS_MT_POSITION_X) ? ABS_MT_POSITION_X : ABS_X;
+    const int yCode = hasBit(absBits, ABS_MT_POSITION_Y) ? ABS_MT_POSITION_Y : ABS_Y;
     input_absinfo xInfo{};
     input_absinfo yInfo{};
     if (ioctl(descriptor, EVIOCGABS(xCode), &xInfo) < 0 ||
@@ -112,8 +125,12 @@ bool Touchscreen::openCandidate(const std::string& path) {
     currentX_ = minX_;
     currentY_ = minY_;
     touching_ = false;
+    trackingIdMode_ = !hasTouchKey && hasTrackingId;
+    xAxisAdjusted_ = false;
+    yAxisAdjusted_ = false;
     std::cout << "[Touch] Opened " << path << " range=" << minX_ << ".." << maxX_
-              << "," << minY_ << ".." << maxY_ << '\n';
+              << "," << minY_ << ".." << maxY_
+              << (trackingIdMode_ ? " mode=tracking-id" : " mode=touch-key") << '\n';
     return true;
 }
 
@@ -161,15 +178,50 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
     for (size_t index = 0; index < count; ++index) {
         const input_event& event = events[index];
         if (event.type == EV_ABS) {
-            if (event.code == ABS_X || event.code == ABS_MT_POSITION_X) currentX_ = event.value;
-            if (event.code == ABS_Y || event.code == ABS_MT_POSITION_Y) currentY_ = event.value;
+            if (event.code == ABS_X || event.code == ABS_MT_POSITION_X) {
+                if (event.value > maxX_ && screenWidth_ > 1) {
+                    if (!xAxisAdjusted_) {
+                        std::cerr << "[Touch] X raw value " << event.value
+                                  << " exceeds advertised max; using screen max "
+                                  << screenWidth_ - 1 << std::endl;
+                        xAxisAdjusted_ = true;
+                    }
+                    maxX_ = screenWidth_ - 1;
+                }
+                currentX_ = event.value;
+            }
+            if (event.code == ABS_Y || event.code == ABS_MT_POSITION_Y) {
+                if (event.value > maxY_ && screenHeight_ > 1) {
+                    if (!yAxisAdjusted_) {
+                        std::cerr << "[Touch] Y raw value " << event.value
+                                  << " exceeds advertised max; using screen max "
+                                  << screenHeight_ - 1 << std::endl;
+                        yAxisAdjusted_ = true;
+                    }
+                    maxY_ = screenHeight_ - 1;
+                }
+                currentY_ = event.value;
+            }
+            if (trackingIdMode_ && event.code == ABS_MT_TRACKING_ID) {
+                if (event.value >= 0) touching_ = true;
+                if (event.value < 0 && touching_) {
+                    point.x = normalize(currentX_, minX_, maxX_, screenWidth_);
+                    point.y = normalize(currentY_, minY_, maxY_, screenHeight_);
+                    touching_ = false;
+                    std::cout << "[Touch] Release raw=" << currentX_ << ',' << currentY_
+                              << " screen=" << point.x << ',' << point.y << std::endl;
+                    return true;
+                }
+            }
         } else if (event.type == EV_KEY &&
                    (event.code == BTN_TOUCH || event.code == BTN_LEFT)) {
-            if (event.value == 1) touching_ = true;
+            if (event.value != 0) touching_ = true;
             if (event.value == 0 && touching_) {
                 point.x = normalize(currentX_, minX_, maxX_, screenWidth_);
                 point.y = normalize(currentY_, minY_, maxY_, screenHeight_);
                 touching_ = false;
+                std::cout << "[Touch] Release raw=" << currentX_ << ',' << currentY_
+                          << " screen=" << point.x << ',' << point.y << std::endl;
                 return true;
             }
         }
@@ -184,6 +236,9 @@ void Touchscreen::close() {
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
     touching_ = false;
+    trackingIdMode_ = false;
+    xAxisAdjusted_ = false;
+    yAxisAdjusted_ = false;
 }
 
 /**

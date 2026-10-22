@@ -1,5 +1,30 @@
 # i.MX6ULL 摄像头与 LCD 视频流工程文档
 
+## 快速编译、部署与运行
+
+在工程根目录执行 ARM 编译：
+
+```sh
+cd /home/hxh1987370733/workspace/cam
+make -B -f Makefile.arm cam_server_arm
+file build_arm/cam_server_arm
+```
+
+将产物复制到板卡并启动。`BOARD_IP` 替换为板卡地址；程序默认使用 `/dev/input/event1`：
+
+```sh
+scp build_arm/cam_server_arm root@BOARD_IP:/opt/cam/
+ssh root@BOARD_IP
+cd /opt/cam
+chmod +x cam_server_arm
+mkdir -p /root/photos
+LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm \
+  --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 \
+  --snapshot-dir /root/photos
+```
+
+触摸并释放圆形按钮时，应依次看到 `[Touch] Release ...`、`[Touch] Photo button activated ...` 和 `[Touch] Photo saved: /root/photos/snapshot_....jpg`；使用 `ls -lh /root/photos` 检查文件。
+
 本工程在 i.MX6ULL Linux 板卡上采集 YUYV 视频，同时输出到 LCD 和浏览器，并支持截图保存与下载。目标 LCD 为 1280x640；程序以 framebuffer 驱动报告的实际模式为准。
 
 ## 1. 文件功能描述
@@ -62,9 +87,9 @@ LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接�
 
 两个队列满时丢最旧帧，不让内存随积压无限增长。HTTP 客户端读取最新 JPEG，慢客户端可以跳过中间帧。容量限制不能保证固定延迟；LCD 和 JPEG 在同一线程串行执行，编码耗时仍会影响显示帧率。
 
-当 LCD 初始化成功时，显示层在右下角绘制固定大小的相机图标按钮。触摸线程打开显式指定的 evdev 设备，或自动扫描 `/dev/input/event*`；只有同时具备触摸按键（`BTN_TOUCH`/`BTN_LEFT`）和绝对 X/Y 轴的设备才会被选中。触摸按下后在按钮内释放，才触发一次拍照。原始触摸范围通过 `EVIOCGABS` 读取，再线性映射到 framebuffer 可见分辨率。
+当 LCD 初始化成功时，显示层在右下角绘制小型圆形白色快门按钮：白色内圆、窄黑色间隙和白色外环。触摸线程默认打开 `/dev/input/event1`；也可以用 `--touch PATH` 指定其他 evdev 设备。设备只要具备触摸按键（`BTN_TOUCH`/`BTN_LEFT`）或多点触摸跟踪 ID（`ABS_MT_TRACKING_ID`），并提供绝对 X/Y 轴即可接受。触摸按下后在圆形按钮内释放，才触发一次拍照。原始触摸范围通过 `EVIOCGABS` 读取，再线性映射到 framebuffer 可见分辨率。
 
-触摸拍照和 HTTP `/snapshot` 共用同一个 JPEG 快照保存函数，因此命名、配额、目录创建、写盘锁和错误结果一致。默认目录为 `/root/photos`；目录不可写、尚无首帧或达到张数配额时，触摸线程只记录错误，不会写入空文件。按钮图标只绘制到 LCD 显存，不会混入 JPEG 或网页视频。
+触摸拍照和 HTTP `/snapshot` 共用同一个 JPEG 快照保存函数，因此命名、配额、目录创建、写盘锁和错误结果一致。默认目录为 `/root/photos`；目录不可写、尚无首帧或达到张数配额时，触摸线程只记录错误，不会写入空文件。圆形按钮只绘制到 LCD 显存，不会混入 JPEG 或网页视频。
 
 ### 2.2 采集格式、缓冲区与数据有效性
 
@@ -266,7 +291,7 @@ LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0
 | `--port N` | 8080 | HTTP 监听端口，1..65535；端口占用或无权限时退出 |
 | `--quality N` | 80 | JPEG 质量，1..100；不是帧率参数 |
 | `--snapshot-dir PATH` | `/root/photos` | 触摸和 HTTP 图片保存目录；父目录须已存在且可写 |
-| `--touch PATH` | 自动扫描 | 显式指定触摸 evdev 节点；指定后设备打开失败会退出 |
+| `--touch PATH` | `/dev/input/event1` | 指定触摸 evdev 节点；设备打开失败会退出 |
 | `--no-touch` | 未启用 | 禁用 LCD 拍照按钮和触摸线程 |
 | `--help` | 未启用 | 显示帮助并退出，不打开设备 |
 
@@ -282,7 +307,7 @@ LCD 与网络同时输出：
 ./cam_server_arm --device /dev/video1 --no-lcd --no-touch --port 8080
 ```
 
-直接运行 `./cam_server_arm` 会尝试可选 LCD 和自动触摸设备；失败时分别打印提示并继续 HTTP/摄像头功能。显式 `--fb /dev/fb0` 或 `--touch /dev/input/event1` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
+直接运行 `./cam_server_arm` 会尝试可选 LCD 和 `/dev/input/event1` 触摸设备；失败时分别打印提示并继续 HTTP/摄像头功能。显式 `--fb /dev/fb0` 或 `--touch PATH` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
 
 ### 4.5 预期日志、画面与 HTTP 接口
 
@@ -290,17 +315,17 @@ LCD 与网络同时输出：
 
 ```text
 [LCD] /dev/fb0 1280x640 16 bpp, stride=2560
-[LCD] PHOTO button x=1040 y=540 w=220 h=80
+[LCD] PHOTO button x=1176 y=536 w=80 h=80
 [V4L2] 驱动: <driver> 设备: <card>
 [V4L2] 分辨率为640x480 YUYV
 [V4L2] 采集已启动
 [HTTP] Server listening on port 8080
-[Touch] Opened /dev/input/event1 range=0..4095,0..4095
+[Touch] Opened /dev/input/event1 range=0..4095,0..4095 mode=touch-key
 ```
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
 
-LCD 打开后会立即在右下角显示蓝底白边的相机图标和 `PHOTO` 按钮，按钮坐标同时输出为 `[LCD] PHOTO button x=... y=... w=... h=...`。触摸并释放按钮后，日志输出 `[Touch] Photo saved: /root/photos/snapshot_....jpg`，照片以当前最新 JPEG 保存到 `/root/photos`。触摸其他区域不拍照；没有首帧时输出 `no camera frame is available`。网页截图仍返回并保存到同一目录。
+LCD 打开后会立即在右下角显示小型圆形白色快门按钮，按钮坐标同时输出为 `[LCD] PHOTO button x=... y=... w=... h=...`。1280x640 面板的默认几何为 `x=1176 y=536 w=80 h=80`；1024x600 面板为 `x=920 y=496 w=80 h=80`。触摸释放时会先打印 `[Touch] Release raw=... screen=...`，命中后打印 `[Touch] Photo button activated ...; capturing latest JPEG`，成功则输出 `[Touch] Photo saved: /root/photos/snapshot_....jpg`。触摸其他区域会输出 `Tap outside photo button`；没有首帧时输出 `no camera frame is available`。网页截图仍返回并保存到同一目录。
 
 浏览器访问 `http://板卡IPv4地址:8080/`。以下是接口约定：
 
@@ -337,11 +362,13 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 | 持续短帧或坏帧日志 | 检查驱动协商结果、USB/摄像头链路和内核日志；当前会丢帧，不会自动修复驱动 |
 | LCD 无法打开 / 模式不支持 | 检查 `ls -l /dev/fb*`；如有 fbset，执行 `fbset -fb /dev/fb0 -i`；核对位深、真彩色位域和 BSP |
 | LCD 黑屏、文字覆盖或撕裂 | 核对背光、面板时序、fbcon 和其他显存写入者；撕裂可能来自当前单页面刷新方式 |
-| LCD 无 `PHOTO` 按钮或无触摸日志 | 先确认运行的是重新编译并复制到板端的 ARM 二进制：`strings ./cam_server_arm | grep 'PHOTO button'` 应能找到按钮日志文本。启动日志必须出现 `[LCD] PHOTO button x=...`，否则检查 LCD 是否成功打开。随后检查 `/dev/input/event*`、触摸权限和 `evtest` 是否能看到按下/释放；必要时用 `--touch PATH` 指定正确节点 |
+| LCD 无 `PHOTO` 按钮或无触摸日志 | 先确认运行的是重新编译并复制到板端的 ARM 二进制：`strings ./cam_server_arm | grep 'PHOTO button'` 应能找到按钮日志文本。启动日志必须出现 `[LCD] PHOTO button x=...`；例如 1024x600 LCD 应为 `x=920 y=496 w=80 h=80`。如果只有 `[LCD] ... 1024x600 ...` 而没有该行，说明板端仍运行旧二进制，需停止旧进程、重新复制并重启。确认 `[Touch] Opened /dev/input/event1 ...` 后，按键释放应出现 `[Touch] Release raw=... screen=...`；没有该日志时检查 event1 权限和 `evtest` 能否看到事件。出现 `Tap outside photo button` 时检查触摸坐标映射；必要时用 `--touch PATH` 指定其他节点 |
+| 触摸坐标总是变成屏幕右下角 | 某些 BSP 同时上报旧的 `ABS_X/ABS_Y` 和真实的 `ABS_MT_POSITION_X/Y` 范围；程序优先使用多点触摸轴。确认 `[Touch] Opened ... range=...` 与实际触摸原始值一致，并重新部署最新 ARM 二进制 |
+| 触摸原始值超过设备声明范围 | 某些 BSP 仍会声明 `0..800,0..480`，但实际发送 `1024x600` 坐标；程序会打印 `raw value exceeds advertised max` 并按 LCD 尺寸自动校正。确认校正后 `screen=...` 坐标落在圆形按钮内 |
 | 触摸位置偏移或上下颠倒 | 对照 `EVIOCGABS` 范围和 framebuffer 分辨率，检查 BSP 旋转/坐标变换；程序只做线性归一化，不做旋转校准 |
 | HTTP 绑定失败 / 网页无法访问 | 查看端口是否占用，核对板卡 IP、同网段连通性和防火墙；启动成功日志不代表外部网络可达 |
 | 截图 503 / 507 / 500 | 依次检查是否已采集首帧、是否达到 100 张、目录父路径/权限/磁盘空间；`df -h` 可查看存储 |
-| 触摸按钮点击但没有文件 | 检查首帧是否已生成、`/root/photos` 权限和磁盘空间；查看 `[Touch] Photo rejected/failed` 日志 |
+| 触摸按钮点击但没有文件 | 先确认出现 `[Touch] Photo button activated`；再检查首帧是否已生成、`/root/photos` 权限和磁盘空间；查看 `[Touch] Photo ignored/rejected/failed` 日志 |
 | 帧率偏低 | 比较 `--no-lcd` 模式，检查 CPU 和网络；降低采集尺寸或 JPEG 质量做实测，程序没有 FPS 设定选项 |
 | HTTP 测试 `Operation not permitted` | 环境禁止创建 socket；转到允许本地 TCP 的环境运行，不能计为测试通过 |
 
@@ -349,7 +376,7 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 
 ### 4.7 测试证据与上板验收
 
-本次加入触摸输入、LCD `PHOTO` 拍照按钮和共享照片保存入口；视频回归测试还验证了按钮立即绘制、按钮几何和命中区域。执行 `make -B cam_server test_video test_v4l2 build/test_http_server` 后，主程序与三组测试均编译成功，视频测试和模拟 V4L2 测试运行通过；`./build/cam_server --help` 已确认显示 `/root/photos`、`--touch` 和 `--no-touch`。另外执行 `make -B -f Makefile.arm cam_server_arm` 已使用固定 SDK/OpenCV 路径生成 ARM ELF；触摸真实事件、LCD 显示和板端照片写入仍需上板验证。
+本次加入触摸输入、LCD `PHOTO` 拍照按钮和共享照片保存入口；视频回归测试还验证了按钮立即绘制、按钮几何和命中区域。触摸线程新增释放坐标、命中判断、截取开始和保存结果日志，并兼容 `ABS_MT_TRACKING_ID` 触摸设备。执行 `make -B cam_server test_video test_v4l2 build/test_http_server` 后，主程序与三组测试均编译成功，视频测试和模拟 V4L2 测试运行通过；`./build/cam_server --help` 已确认显示 `/root/photos`、`--touch` 和 `--no-touch`。另外执行 `make -B -f Makefile.arm cam_server_arm` 已使用固定 SDK/OpenCV 路径生成 ARM ELF；触摸真实事件、LCD 显示和板端照片写入仍需上板验证。
 
 HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 构建已完成，真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
 
@@ -362,6 +389,6 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 | 设备故障 | 摄像头拔出并被驱动报告为错误时返回非零；只报告超时的驱动可能继续等待 |
 | 长时间运行 | 记录板卡型号、BSP、摄像头、位深、参数、运行时长、CPU/内存、实际帧率和异常日志 |
 | 多客户端与配额 | 慢客户端不长期占用帧锁；超过连接上限返回 503；截图配额满返回 507 |
-| 触摸拍照 | 点击 LCD `PHOTO` 按钮生成一张 `/root/photos/snapshot_*.jpg`，重复点击产生不同递增序号；启动时可用 `[LCD] PHOTO button ...` 日志核对按钮几何位置 |
+| 触摸拍照 | 点击 LCD 圆形白色按钮生成一张 `/root/photos/snapshot_*.jpg`，重复点击产生不同递增序号；启动时可用 `[LCD] PHOTO button ...` 日志核对按钮几何位置 |
 
 性能和稳定性数据需保留实测记录后再补充，当前没有固定帧率、延迟或持续运行时长的达标承诺。

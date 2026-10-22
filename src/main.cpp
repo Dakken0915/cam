@@ -24,7 +24,7 @@ struct Options {
     std::string device = "/dev/video1";
     std::string framebuffer = "/dev/fb0";
     std::string snapshots = "/root/photos";
-    std::string touchDevice;
+    std::string touchDevice = "/dev/input/event1";
     int width = 640;
     int height = 480;
     int port = 8080;
@@ -144,7 +144,7 @@ void printHelp() {
               << "  --port N            HTTP port (default 8080)\n"
               << "  --quality N         JPEG quality 1..100 (default 80)\n"
               << "  --snapshot-dir PATH Snapshot storage (default /root/photos)\n"
-              << "  --touch PATH        Require this evdev touchscreen (default auto-detect)\n"
+              << "  --touch PATH        Require this evdev touchscreen (default /dev/input/event1)\n"
               << "  --no-touch          Disable the LCD touch button\n"
               << "  --help              Show this help\n";
 }
@@ -233,11 +233,17 @@ void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
         while (signalRunning && !state.stop) {
             TouchPoint point;
             if (!touch.waitForTap(point, 250)) continue;
-            if (!display.isPhotoButton(point.x, point.y)) continue;
+            if (!display.isPhotoButton(point.x, point.y)) {
+                std::cout << "[Touch] Tap outside photo button at " << point.x << ','
+                          << point.y << std::endl;
+                continue;
+            }
+            std::cout << "[Touch] Photo button activated at " << point.x << ','
+                      << point.y << "; capturing latest JPEG" << std::endl;
             std::string path;
             const HttpServer::SnapshotResult result = server.captureSnapshot(path);
             if (result == HttpServer::SnapshotResult::Saved) {
-                std::cout << "[Touch] Photo saved: " << path << '\n';
+                std::cout << "[Touch] Photo saved: " << path << std::endl;
             } else if (result == HttpServer::SnapshotResult::NoFrame) {
                 std::cerr << "[Touch] Photo ignored: no camera frame is available\n";
             } else if (result == HttpServer::SnapshotResult::StorageFull) {
@@ -277,11 +283,8 @@ int run(const Options& options) {
     if (options.touchEnabled && lcdActive) {
         touchActive = touch.open(options.touchDevice);
         if (touchActive) {
-            const PhotoButton button = display.photoButton();
-            touch.setScreenSize(button.x + button.width > 0 ?
-                                button.x + button.width + 20 : 1,
-                                button.y + button.height > 0 ?
-                                button.y + button.height + 20 : 1);
+            const auto screen = display.screenSize();
+            touch.setScreenSize(screen.first, screen.second);
         } else if (options.touchRequired) {
             std::cerr << "[Touch] Required touchscreen could not be opened\n";
             server.stop();

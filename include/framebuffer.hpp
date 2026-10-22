@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <linux/fb.h>
 #include <opencv2/core.hpp>
 
@@ -44,6 +45,11 @@ public:
      */
     bool renderPhotoButton();
     /**
+     * @brief  Return the configured visible framebuffer dimensions.
+     * @retval pair<int, int> Width and height in screen pixels; both are zero when unconfigured.
+     */
+    std::pair<int, int> screenSize() const;
+    /**
      * @brief  Return the LCD photo button rectangle.
      * @retval PhotoButton Screen coordinates and dimensions; zero dimensions mean unavailable.
      */
@@ -76,7 +82,6 @@ private:
 
     uint32_t packPixel(uint8_t blue, uint8_t green, uint8_t red) const;
     void drawPhotoButton();
-    void drawGlyph(char glyph, int x, int y, int scale, uint32_t color);
     void writePixel(int x, int y, uint32_t pixel);
 };
 
@@ -115,6 +120,11 @@ public:
      * @note   OpenCV rendering errors propagate to the caller.
      */
     bool render(const cv::Mat& bgr);
+    /**
+     * @brief  Return the visible framebuffer dimensions used for touch normalization.
+     * @retval pair<int, int> Width and height in screen pixels; both are zero when unopened.
+     */
+    std::pair<int, int> screenSize() const;
     /**
      * @brief  Return the photo button rectangle in framebuffer coordinates.
      * @retval PhotoButton Current button geometry, or zero dimensions if unavailable.

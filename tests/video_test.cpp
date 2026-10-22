@@ -94,14 +94,16 @@ void testPhotoButton() {
             "photo button surface rejected");
     require(surface.renderPhotoButton(), "photo button was not drawn");
     const PhotoButton button = surface.photoButton();
-    require(button.x == 0 && button.y == 20 && button.width == 220 && button.height == 80,
+    require(button.x == 136 && button.y == 16 && button.width == 80 && button.height == 80,
             "unexpected photo button geometry");
-    require(surface.isPhotoButton(button.x + 10, button.y + 10),
+    require(surface.isPhotoButton(button.x + button.width / 2, button.y + button.height / 2),
             "photo button hit test rejected an interior point");
-    require(!surface.isPhotoButton(button.x - 1, button.y + 10),
+    require(!surface.isPhotoButton(button.x, button.y),
             "photo button hit test accepted an exterior point");
     uint32_t topLeft = 0;
-    std::memcpy(&topLeft, memory.data() + static_cast<size_t>(button.y) * fixed.line_length,
+    const size_t topCenter = static_cast<size_t>(button.y + 1) * fixed.line_length +
+                             static_cast<size_t>(button.x + button.width / 2) * sizeof(uint32_t);
+    std::memcpy(&topLeft, memory.data() + topCenter,
                 sizeof(topLeft));
     require(topLeft == 0xffffffffu, "photo button border was not rendered");
 }

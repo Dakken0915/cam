@@ -25,7 +25,7 @@ public:
     /**
      * @brief  Open a touchscreen event device and read its absolute ranges.
      * @param  [in] device Explicit event path; an empty path scans /dev/input/event*.
-     * @retval true A device with touch keys and X/Y absolute axes was opened.
+     * @retval true A device with touch keys or tracking IDs and X/Y absolute axes was opened.
      * @retval false No suitable device could be opened or queried.
      * @note   Coordinates are normalized to the display size supplied by setScreenSize().
      */
@@ -68,9 +68,12 @@ private:
     int currentX_ = 0;
     int currentY_ = 0;
     bool touching_ = false;
+    bool trackingIdMode_ = false;
+    bool xAxisAdjusted_ = false;
+    bool yAxisAdjusted_ = false;
 
     /**
-     * @brief  Open one candidate and verify touch keys and absolute X/Y axes.
+     * @brief  Open one candidate and verify touch keys or tracking IDs with absolute X/Y axes.
      * @param  [in] path Candidate evdev path.
      * @retval true The candidate is a compatible touchscreen.
      * @retval false The candidate is not compatible or cannot be queried.
