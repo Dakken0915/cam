@@ -10,7 +10,7 @@ CXXFLAGS += -I ./include
 SRC_DIR = src
 OBJ_DIR   = build
 
-COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp
+COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp $(SRC_DIR)/face_analyzer.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server: $(OBJ_DIR)/cam_server
@@ -32,6 +32,13 @@ test_video: $(OBJ_DIR)/test_video
 test_v4l2: $(OBJ_DIR)/test_v4l2
 	$(OBJ_DIR)/test_v4l2
 
+test_face_analyzer: $(OBJ_DIR)/test_face_analyzer
+	$(OBJ_DIR)/test_face_analyzer
+
+$(OBJ_DIR)/test_face_analyzer: tests/face_analyzer_test.cpp $(SRC_DIR)/face_analyzer.cpp $(HEADERS)
+	@mkdir -p $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) $(OPENCV_CFLAGS) tests/face_analyzer_test.cpp $(SRC_DIR)/face_analyzer.cpp -o $@ $(LDFLAGS) $(OPENCV_LIBS)
+
 $(OBJ_DIR)/test_v4l2: tests/v4l2_test.cpp $(SRC_DIR)/v4l2.cpp $(HEADERS)
 	@mkdir -p $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) tests/v4l2_test.cpp $(SRC_DIR)/v4l2.cpp -o $@ -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=poll,--wrap=mmap,--wrap=munmap
@@ -43,9 +50,9 @@ $(OBJ_DIR)/test_video: tests/video_test.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR
 run: cam_server
 	$(OBJ_DIR)/cam_server
 
-test: test_http_server test_video test_v4l2
+test: test_http_server test_video test_v4l2 test_face_analyzer
 
 clean:
 	rm -rf $(OBJ_DIR)
 
-.PHONY: cam_server run test test_http_server test_video test_v4l2 clean
+.PHONY: cam_server run test test_http_server test_video test_v4l2 test_face_analyzer clean

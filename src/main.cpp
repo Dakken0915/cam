@@ -12,6 +12,7 @@
 #include "jpeg_encoder.hpp"
 #include "framebuffer.hpp"
 #include "touchscreen.hpp"
+#include "face_analyzer.hpp"
 #include "http_server.hpp"
 #include "frame.hpp"
 #include "bounded_queue.hpp"
@@ -25,10 +26,14 @@ struct Options {
     std::string framebuffer = "/dev/fb0";
     std::string snapshots = "/root/photos";
     std::string touchDevice = "/dev/input/event1";
+    std::string faceCascade = "assets/haarcascade_frontalface_default.xml";
+    std::string faceReference;
     int width = 640;
     int height = 480;
     int port = 8080;
     int quality = 80;
+    int grayThresholdPercent = 75;
+    int faceInterval = 8;
     bool lcdEnabled = true;
     bool lcdRequired = false;
     bool touchEnabled = true;
@@ -103,6 +108,10 @@ Options parseOptions(int argc, char** argv) {
         {"snapshot-dir", required_argument, nullptr, 's'},
         {"touch", required_argument, nullptr, 't'},
         {"no-touch", no_argument, nullptr, 'T'},
+        {"face-cascade", required_argument, nullptr, 'c'},
+        {"face-reference", required_argument, nullptr, 'r'},
+        {"gray-threshold", required_argument, nullptr, 'g'},
+        {"face-interval", required_argument, nullptr, 'i'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
@@ -119,6 +128,10 @@ Options parseOptions(int argc, char** argv) {
         case 's': result.snapshots = optarg; break;
         case 't': result.touchDevice = optarg; result.touchRequired = true; break;
         case 'T': result.touchEnabled = false; break;
+        case 'c': result.faceCascade = optarg; break;
+        case 'r': result.faceReference = optarg; break;
+        case 'g': result.grayThresholdPercent = parseNumber(optarg, 0, 100); break;
+        case 'i': result.faceInterval = parseNumber(optarg, 1, 120); break;
         case 'h': result.help = true; break;
         default: throw std::invalid_argument("Unknown or incomplete option; use --help");
         }
@@ -146,6 +159,10 @@ void printHelp() {
               << "  --snapshot-dir PATH Snapshot storage (default /root/photos)\n"
               << "  --touch PATH        Require this evdev touchscreen (default /dev/input/event1)\n"
               << "  --no-touch          Disable the LCD touch button\n"
+              << "  --face-cascade PATH Haar cascade XML (default assets/haarcascade_frontalface_default.xml)\n"
+              << "  --face-reference PATH Optional grayscale comparison image\n"
+              << "  --gray-threshold N  Similarity threshold 0..100 (default 75)\n"
+              << "  --face-interval N   Run face analysis every N frames (default 8)\n"
               << "  --help              Show this help\n";
 }
 
@@ -185,12 +202,14 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
  * @param  [in,out] display Display object used when LCD output is active.
  * @param  [in] lcdActive Whether the display was initialized.
  * @param  [in] quality JPEG quality in the range 1 to 100.
+ * @param  [in,out] faceWorker Background Haar detector and optional comparator.
+ * @param  [in] faceActive Whether face analysis was initialized successfully.
  * @param  [in,out] state Shared failure and shutdown state.
  * @note   Records processing exceptions and closes both queues on exit; LCD and JPEG work is serial.
  */
 void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 FramebufferDisplay& display, bool lcdActive, int quality,
-                PipelineState& state) {
+                FaceAnalysisWorker& faceWorker, bool faceActive, PipelineState& state) {
     try {
         JpegEncoder encoder;
         Frame frame;
@@ -202,6 +221,7 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 throw std::runtime_error("Incomplete YUYV frame");
             const cv::Mat& bgr = encoder.convertToBgr(frame.data.data(), frame.width,
                 frame.height, static_cast<size_t>(frame.bytes_per_line));
+            if (faceActive) faceWorker.submit(bgr);
             if (lcdActive && !display.render(bgr))
                 throw std::runtime_error("LCD rendering failed");
             Frame encoded;
@@ -265,6 +285,17 @@ void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
  * @note   Joins worker threads before releasing their devices; optional LCD initialization may fall back to HTTP only.
  */
 int run(const Options& options) {
+    FaceAnalyzer faceAnalyzer;
+    const bool faceCascadeLoaded = faceAnalyzer.loadCascade(options.faceCascade);
+    const bool faceReferenceLoaded = options.faceReference.empty() ||
+                                     faceAnalyzer.loadReference(options.faceReference);
+    const bool faceActive = faceCascadeLoaded && faceReferenceLoaded;
+    if (!faceActive)
+        std::cerr << "[Face] Face analysis disabled; video pipeline will continue\n";
+    const double grayThreshold = options.grayThresholdPercent / 100.0;
+    FaceAnalysisWorker faceWorker(faceAnalyzer, grayThreshold,
+                                  static_cast<unsigned int>(options.faceInterval));
+    if (faceActive) faceWorker.start();
     FramebufferDisplay display;
     bool lcdActive = false;
     if (options.lcdEnabled) {
@@ -304,7 +335,8 @@ int run(const Options& options) {
     try {
         captureThread = std::thread(captureLoop, std::ref(capture), std::ref(raw), std::ref(state));
         encodeThread = std::thread(encodeLoop, std::ref(raw), std::ref(jpeg),
-            std::ref(display), lcdActive, options.quality, std::ref(state));
+            std::ref(display), lcdActive, options.quality, std::ref(faceWorker),
+            faceActive, std::ref(state));
         if (touchActive)
             touchThread = std::thread(touchLoop, std::ref(touch), std::cref(display),
                                       std::ref(server), std::ref(state));
@@ -316,6 +348,7 @@ int run(const Options& options) {
     state.stop = true;
     raw.close();
     jpeg.close();
+    faceWorker.stop();
     if (captureThread.joinable()) captureThread.join();
     if (encodeThread.joinable()) encodeThread.join();
     if (touchThread.joinable()) touchThread.join();

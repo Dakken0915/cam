@@ -13,14 +13,15 @@ file build_arm/cam_server_arm
 将产物复制到板卡并启动。`BOARD_IP` 替换为板卡地址；程序默认使用 `/dev/input/event1`：
 
 ```sh
-scp build_arm/cam_server_arm root@BOARD_IP:/opt/cam/
+scp build_arm/cam_server_arm assets/haarcascade_frontalface_default.xml root@BOARD_IP:/opt/cam/
 ssh root@BOARD_IP
 cd /opt/cam
 chmod +x cam_server_arm
 mkdir -p /root/photos
 LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm \
   --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 \
-  --snapshot-dir /root/photos
+  --snapshot-dir /root/photos \
+  --face-cascade /opt/cam/haarcascade_frontalface_default.xml
 ```
 
 触摸并释放圆形按钮时，应依次看到 `[Touch] Release ...`、`[Touch] Photo button activated ...` 和 `[Touch] Photo saved: /root/photos/snapshot_....jpg`；使用 `ls -lh /root/photos` 检查文件。
@@ -40,6 +41,7 @@ cam/
 ├── include/                  模块接口和数据结构
 ├── src/                      应用入口与模块实现
 │   └── touchscreen.cpp       Linux evdev 触摸读取
+├── assets/                   Haar 人脸分类器 XML 模型
 ├── tests/                    独立 C++ 回归测试
 ├── build/                    本机编译产物（构建时生成）
 ├── build_arm/                ARM 编译产物（构建时生成）
@@ -54,11 +56,14 @@ cam/
 | [src/framebuffer.cpp](src/framebuffer.cpp)、[include/framebuffer.hpp](include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
 | [src/touchscreen.cpp](src/touchscreen.cpp)、[include/touchscreen.hpp](include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
 | [src/http_server.cpp](src/http_server.cpp)、[include/http_server.hpp](include/http_server.hpp) | `HttpServer` 提供网页、MJPEG 和截图，维护最新 JPEG、客户端数量和截图配额。页面 HTML/CSS/JavaScript 内嵌在源文件中。 |
+| [src/face_analyzer.cpp](src/face_analyzer.cpp)、[include/face_analyzer.hpp](include/face_analyzer.hpp) | 使用 OpenCV Haar cascade 检测人脸，并对检测到的人脸执行归一化灰度图相似度比对。 |
+| [assets/haarcascade_frontalface_default.xml](assets/haarcascade_frontalface_default.xml) | OpenCV `haarcascade_frontalface_default` 模型；运行时按 `--face-cascade` 加载。 |
 | [include/frame.hpp](include/frame.hpp) | `Frame` 保存数据、序号、尺寸、行跨度和单调时钟时间戳。 |
 | [include/bounded_queue.hpp](include/bounded_queue.hpp) | `BoundedQueue<T>` 提供线程安全的 `push`、阻塞 `take` 和 `close`。 |
 | [tests/video_test.cpp](tests/video_test.cpp) | 校验显示像素、黑边、偏移、显存保护区、YUYV 行跨度、JPEG 和队列。 |
 | [tests/v4l2_test.cpp](tests/v4l2_test.cpp) | 通过 GNU 链接器 `--wrap` 模拟系统调用，验证驱动协商、坏帧处理及失败清理。 |
 | [tests/http_server_test.cpp](tests/http_server_test.cpp) | 通过本机 TCP 验证路由、截图内容、配额、非法请求、断开连接及重启。 |
+| [tests/face_analyzer_test.cpp](tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
 | [Makefile](Makefile)、[Makefile.arm](Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
 
 仓库包含用户态应用，不包含设备树、摄像头驱动、LCD 驱动或板级根文件系统。
@@ -81,6 +86,8 @@ flowchart LR
     K["触摸线程：evdev release"] --> L["LCD PHOTO 按钮命中"]
     L --> M["共享快照保存：/root/photos"]
     I --> M
+    D --> N[灰度图缩放与 Haar 检测]
+    N --> O[可选参考图相似度]
 ```
 
 LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接收连接的线程，每个已接纳客户端使用独立处理线程。
@@ -159,6 +166,14 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
 目前不支持 MJPEG-only、UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。JPEG 使用 CPU 编码；单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
+
+### 2.7 Haar 人脸检测与灰度图比对
+
+`FaceAnalyzer` 在 BGR 帧中先转换灰度图，再使用 OpenCV `CascadeClassifier` 和 `haarcascade_frontalface_default.xml` 查找正面人脸。为降低 i.MX6ULL 的 CPU 压力，宽度超过 320 像素时先缩小检测图，检测框再映射回摄像头原始坐标；原始 BGR 帧和 JPEG 尺寸不被改变。`FaceAnalysisWorker` 在独立工作线程检测，编码线程每次只复制抽样帧并立即继续 LCD/JPEG 输出；邮箱只保存一张待处理帧，忙碌时用新帧覆盖旧帧，避免检测结果排队积累。默认每 8 帧提交一次，可用 `--face-interval N` 调整为每 1..120 帧；间隔越大，平均 CPU 开销越低，但人脸出现/离开的检测反馈越慢。线程隔离可以减少检测耗时对视频流水线的直接阻塞，但不能增加 i.MX6ULL 的总 CPU 算力。检测日志只在检测数量或匹配状态变化时输出，避免刷屏。
+
+如果通过 `--face-reference PATH` 提供参考图片，每个检测框会被裁剪并统一到 64x64 灰度图，经过直方图均衡化和 0..1 归一化，然后计算平均绝对差，得到 `1 - mean(abs(a-b))` 的 0..1 相似度。`--gray-threshold` 以百分比输入，默认 75；相似度达到阈值时日志标记 `matched=yes`。这是一种便于部署和学习的图像相似度示例，不是身份认证，也不具备深度人脸识别对姿态、光照和遮挡的鲁棒性。未提供参考图时仍执行检测，但不输出有效相似度。
+
+模型或参考图加载失败只会禁用人脸分析，摄像头、LCD 和 HTTP 视频流仍可继续运行；部署时必须把 XML 文件与 ARM 可执行文件一起复制到板端，并从包含 `assets/` 的目录启动，或使用绝对模型路径。
 
 ## 3. 学习指南
 
@@ -243,7 +258,7 @@ make test_http_server
 
 ### 4.3 ARM 交叉编译与部署
 
-本机 100ask Buildroot SDK 位于 `$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot`。`Makefile.arm` 默认使用该 SDK 的编译器，并将 OpenCV 前缀设为 `$HOME/opencv_arm_buildroot_install`。SDK sysroot 应与板端 glibc、libstdc++ 和浮点 ABI 匹配；不要回退到 WSL Ubuntu 自带的 ARM 编译器。其他位置的 SDK 可通过 `BUILDROOT_SDK=...` 覆盖。
+本机 100ask Buildroot SDK 位于 `$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot`。`Makefile.arm` 默认使用该 SDK 的编译器，并将 OpenCV 前缀设为 `$HOME/opencv_arm_install`。SDK sysroot 应与板端 glibc、libstdc++ 和浮点 ABI 匹配；不要回退到 WSL Ubuntu 自带的 ARM 编译器。其他位置的 SDK 可通过 `BUILDROOT_SDK=...` 覆盖。
 
 ```sh
 SDK="$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot"
@@ -257,16 +272,43 @@ OpenCV 源码在 `~/workspace/opencv_src/opencv` 时，可使用同一 Buildroot
 cmake -S "$HOME/workspace/opencv_src/opencv" \
   -B "$HOME/workspace/opencv_src/build-arm-100ask" \
   -DCMAKE_TOOLCHAIN_FILE="$SDK/share/buildroot/toolchainfile.cmake" \
-  -DCMAKE_INSTALL_PREFIX="$HOME/opencv_arm_buildroot_install" \
-  -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_SHARED_LIBS=ON \
-  -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DWITH_JPEG=ON
+  -DCMAKE_INSTALL_PREFIX="$HOME/opencv_arm_install" \
+  -DBUILD_LIST=core,imgproc,imgcodecs,calib3d,objdetect -DBUILD_SHARED_LIBS=ON \
+  -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DWITH_JPEG=ON \
+  -DWITH_WEBP=OFF -DWITH_OPENJPEG=OFF -DWITH_TIFF=OFF
 cmake --build "$HOME/workspace/opencv_src/build-arm-100ask" --parallel 2
 cmake --install "$HOME/workspace/opencv_src/build-arm-100ask"
 make -f Makefile.arm cam_server_arm
 file build_arm/cam_server_arm
 ```
 
-该 ARM 规则已在 `Makefile.arm` 内固定使用工程上级的 `../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot` 和 `../../opencv_arm_buildroot_install`，因此不需要在命令行重复传入路径；路径以 Makefile 所在目录计算，从其他工作目录调用也有效。命令链接 `opencv_core`、`opencv_imgproc`、`opencv_imgcodecs` 和 pthread；OpenCV 必须启用 JPEG 编码支持。额外动态库依赖由目标 OpenCV 的构建配置决定。需要独立输出目录时可追加 `OBJ_DIR=build_arm_100ask`；构建应用与 OpenCV 时应使用同一个 SDK，避免引入比板端更新的 GLIBC/GLIBCXX 符号版本。
+推荐使用打包目标收集程序、模型和全部 OpenCV 运行库。它还会把 `$ORIGIN/lib` 写入程序的运行时搜索路径：
+
+```sh
+make -B -f Makefile.arm package_arm
+scp -r dist_arm root@BOARD_IP:/opt/cam/
+ssh root@BOARD_IP
+cd /opt/cam/dist_arm
+chmod +x cam_server_arm
+mkdir -p /root/photos
+./cam_server_arm --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 \
+  --snapshot-dir /root/photos \
+  --face-cascade ./assets/haarcascade_frontalface_default.xml
+```
+
+`dist_arm/lib/` 会包含 `libopencv_objdetect.so.413`、`libopencv_calib3d.so.413`、`libopencv_features2d.so.413`、`libopencv_flann.so.413` 及 core/imgproc/imgcodecs。板端已有同名旧库时也优先使用该目录中的匹配版本；若板端缺少 JPEG `libjpeg.so.8`，还需要从同一 SDK/根文件系统补齐该库。
+
+如果 OpenCV 已经在工程目录下的临时前缀完成构建，需要在可写宿主机终端把它覆盖到默认前缀，再编译应用：
+
+```sh
+cp -a /home/hxh1987370733/workspace/cam/opencv_arm_buildroot_install/. \
+  /home/hxh1987370733/opencv_arm_install/
+make -B -f Makefile.arm cam_server_arm
+```
+
+覆盖完成后应确认以下文件存在：`$HOME/opencv_arm_install/include/opencv4/opencv2/objdetect.hpp`、`$HOME/opencv_arm_install/lib/libopencv_objdetect.so`、`libopencv_calib3d.so`、`libopencv_features2d.so` 和 `libopencv_flann.so`。这些库需要一起复制到板端的库目录。
+
+该 ARM 规则已在 `Makefile.arm` 内固定使用工程上级的 `../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot` 和 `../../opencv_arm_install`，因此不需要在命令行重复传入路径；路径以 Makefile 所在目录计算，从其他工作目录调用也有效。命令链接 `opencv_objdetect`、`opencv_calib3d`、`opencv_features2d`、`opencv_flann`、`opencv_imgcodecs`、`opencv_imgproc`、`opencv_core` 和 pthread；OpenCV 必须启用 JPEG、`calib3d` 与 `objdetect`。Makefile 会在编译前检查 `objdetect.hpp` 和 `libopencv_objdetect`，缺少时给出重建提示。需要独立输出目录时可追加 `OBJ_DIR=build_arm_100ask`；构建应用与 OpenCV 时应使用同一个 SDK，避免引入比板端更新的 GLIBC/GLIBCXX 符号版本。
 
 把 `build_arm/cam_server_arm` 和匹配的运行库部署至板卡。例如将程序放到 `/opt/cam/`、私有动态库放到 `/opt/cam/lib/` 后，在板端执行：
 
@@ -293,7 +335,20 @@ LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0
 | `--snapshot-dir PATH` | `/root/photos` | 触摸和 HTTP 图片保存目录；父目录须已存在且可写 |
 | `--touch PATH` | `/dev/input/event1` | 指定触摸 evdev 节点；设备打开失败会退出 |
 | `--no-touch` | 未启用 | 禁用 LCD 拍照按钮和触摸线程 |
+| `--face-cascade PATH` | `assets/haarcascade_frontalface_default.xml` | Haar XML 模型；相对路径相对于启动目录，加载失败时禁用人脸分析 |
+| `--face-reference PATH` | 空 | 可选参考图片；对每个检测框进行简易灰度相似度比对 |
+| `--gray-threshold N` | `75` | 相似度阈值百分比，范围 0..100；仅在指定参考图时生效 |
+| `--face-interval N` | `8` | 每 N 个处理帧执行一次人脸检测和比对，范围 1..120；增大可降低平均 CPU 使用 |
 | `--help` | 未启用 | 显示帮助并退出，不打开设备 |
+
+`make package_arm` 生成的目录结构如下：
+
+```text
+dist_arm/
+├── cam_server_arm
+├── assets/haarcascade_frontalface_default.xml
+└── lib/libopencv_*.so*
+```
 
 LCD 与网络同时输出：
 
@@ -305,6 +360,11 @@ LCD 与网络同时输出：
 
 ```sh
 ./cam_server_arm --device /dev/video1 --no-lcd --no-touch --port 8080
+
+# 启用参考图比对（参考图可为 JPG/PNG）
+./cam_server_arm --device /dev/video1 --fb /dev/fb0 \
+  --face-cascade /opt/cam/haarcascade_frontalface_default.xml \
+  --face-reference /opt/cam/reference.jpg --gray-threshold 75
 ```
 
 直接运行 `./cam_server_arm` 会尝试可选 LCD 和 `/dev/input/event1` 触摸设备；失败时分别打印提示并继续 HTTP/摄像头功能。显式 `--fb /dev/fb0` 或 `--touch PATH` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
@@ -321,6 +381,8 @@ LCD 与网络同时输出：
 [V4L2] 采集已启动
 [HTTP] Server listening on port 8080
 [Touch] Opened /dev/input/event1 range=0..4095,0..4095 mode=touch-key
+[Face] Haar cascade loaded: assets/haarcascade_frontalface_default.xml
+[Face] detected=1 box=210,80,180x180 similarity=0.83 matched=yes
 ```
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
@@ -354,6 +416,10 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 | 现象或日志 | 排查步骤 |
 | --- | --- |
 | `opencv4` pkg-config 找不到 | 确认本机 OpenCV 开发文件和 `opencv4.pc` 已安装；自定义安装时配置 `PKG_CONFIG_PATH` |
+| ARM 编译提示缺少 `objdetect.hpp` 或 `libopencv_objdetect` | 重新配置 ARM OpenCV，`BUILD_LIST` 必须包含 `core,imgproc,imgcodecs,calib3d,objdetect`；安装后确认 `OPENCV_ARM/include/opencv4/opencv2/objdetect.hpp` 和对应库存在，再运行 `make -f Makefile.arm clean && make -f Makefile.arm` |
+| 板端提示 `libopencv_objdetect.so.413` 或其依赖缺失 | 不要只复制可执行文件；在开发机执行 `make -B -f Makefile.arm package_arm`，将整个 `dist_arm/` 复制到板端，并从该目录启动。检查 `ls -l dist_arm/lib`；程序已内置 `$ORIGIN/lib` 搜索路径，也可临时设置 `LD_LIBRARY_PATH=./lib` |
+| 启动提示 `Cannot load Haar cascade` | 确认 XML 已复制到板端，当前目录包含 `assets/`，或使用 `--face-cascade` 指定绝对路径；模型失败不会阻止视频流 |
+| 没有 `[Face] detected=...` 日志 | 确认模型已加载、画面中有人脸且为接近正面的姿态；日志只在检测结果发生变化时打印，避免逐帧输出 |
 | 交叉编译器不存在 | 检查 `BUILDROOT_SDK` 路径和 SDK 的 `bin/arm-buildroot-linux-gnueabihf-g++`；不要用本机 g++ 或不匹配的 Ubuntu ARM 工具链编译板端产物 |
 | 找不到 OpenCV 头文件或库 | 检查 `OPENCV_ARM` 是否指向 ARM OpenCV 安装前缀，确认其中有 `include/opencv4/` 和 `lib/`，并确认库与编译器 ABI 匹配 |
 | 板端 `Exec format error` | 用 `file` 检查是否误部署了 `build/cam_server`，同时核对目标架构 |
@@ -369,16 +435,16 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 | HTTP 绑定失败 / 网页无法访问 | 查看端口是否占用，核对板卡 IP、同网段连通性和防火墙；启动成功日志不代表外部网络可达 |
 | 截图 503 / 507 / 500 | 依次检查是否已采集首帧、是否达到 100 张、目录父路径/权限/磁盘空间；`df -h` 可查看存储 |
 | 触摸按钮点击但没有文件 | 先确认出现 `[Touch] Photo button activated`；再检查首帧是否已生成、`/root/photos` 权限和磁盘空间；查看 `[Touch] Photo ignored/rejected/failed` 日志 |
-| 帧率偏低 | 比较 `--no-lcd` 模式，检查 CPU 和网络；降低采集尺寸或 JPEG 质量做实测，程序没有 FPS 设定选项 |
+| 帧率偏低 | 增大 `--face-interval`（例如 12 或 16）降低平均检测负载；再比较 `--no-lcd` 模式，检查 CPU 和网络，降低采集尺寸或 JPEG 质量做实测 |
 | HTTP 测试 `Operation not permitted` | 环境禁止创建 socket；转到允许本地 TCP 的环境运行，不能计为测试通过 |
 
 诊断命令依赖板端工具是否安装。不要直接修改像素时钟、清空截图或解除控制台绑定来替代定位问题。
 
 ### 4.7 测试证据与上板验收
 
-本次加入触摸输入、LCD `PHOTO` 拍照按钮和共享照片保存入口；视频回归测试还验证了按钮立即绘制、按钮几何和命中区域。触摸线程新增释放坐标、命中判断、截取开始和保存结果日志，并兼容 `ABS_MT_TRACKING_ID` 触摸设备。执行 `make -B cam_server test_video test_v4l2 build/test_http_server` 后，主程序与三组测试均编译成功，视频测试和模拟 V4L2 测试运行通过；`./build/cam_server --help` 已确认显示 `/root/photos`、`--touch` 和 `--no-touch`。另外执行 `make -B -f Makefile.arm cam_server_arm` 已使用固定 SDK/OpenCV 路径生成 ARM ELF；触摸真实事件、LCD 显示和板端照片写入仍需上板验证。
+本次加入 Haar 人脸检测、可选灰度图相似度比对、异步检测线程和每 N 帧抽样；`make -B cam_server build/test_face_analyzer test_video test_v4l2` 已编译成功，`Face analyzer tests passed`、`Video pipeline tests passed` 和 `V4L2 capture tests passed` 已在主机侧验证。`./build/cam_server --help` 已确认人脸参数。`make -B -f Makefile.arm package_arm` 可重新构建并打包 ARM 程序、模型和 OpenCV 动态库。真实摄像头、LCD 和 i.MX6ULL 上的 FPS/CPU 变化仍需实测。
 
-HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 构建已完成，真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
+HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 构建因现有 OpenCV 安装缺少 `objdetect` 尚未完成，真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
 
 | 上板验收项 | 预期结果 |
 | --- | --- |
@@ -390,5 +456,7 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 | 长时间运行 | 记录板卡型号、BSP、摄像头、位深、参数、运行时长、CPU/内存、实际帧率和异常日志 |
 | 多客户端与配额 | 慢客户端不长期占用帧锁；超过连接上限返回 503；截图配额满返回 507 |
 | 触摸拍照 | 点击 LCD 圆形白色按钮生成一张 `/root/photos/snapshot_*.jpg`，重复点击产生不同递增序号；启动时可用 `[LCD] PHOTO button ...` 日志核对按钮几何位置 |
+| 人脸检测 | 启动日志显示 Haar 模型已加载；画面出现或离开正面人脸时输出检测数量与框坐标 |
+| 灰度图比对 | 指定参考图后，检测日志输出 0..1 相似度和 `matched=yes/no`；改变 `--gray-threshold` 可调整判定边界 |
 
 性能和稳定性数据需保留实测记录后再补充，当前没有固定帧率、延迟或持续运行时长的达标承诺。

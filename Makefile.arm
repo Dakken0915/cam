@@ -9,18 +9,34 @@ $(error ARM 编译器不存在: $(CXX)；请检查 BUILDROOT_SDK 或指定兼容
 endif
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -g -Iinclude
 
-OPENCV_ARM ?= $(abspath $(PROJECT_DIR)/../../opencv_arm_buildroot_install)
+OPENCV_ARM ?= $(abspath $(PROJECT_DIR)/../../opencv_arm_install)
+ifeq ($(wildcard $(OPENCV_ARM)/include/opencv4/opencv2/objdetect.hpp),)
+$(error ARM OpenCV is missing objdetect.hpp in $(OPENCV_ARM); rebuild OpenCV with BUILD_LIST=core,imgproc,imgcodecs,calib3d,objdetect)
+endif
+ifeq ($(wildcard $(OPENCV_ARM)/lib/libopencv_objdetect.so*),)
+$(error ARM OpenCV is missing libopencv_objdetect; rebuild OpenCV with BUILD_LIST=core,imgproc,imgcodecs,calib3d,objdetect)
+endif
 CXXFLAGS += -I$(OPENCV_ARM)/include/opencv4
 LDFLAGS  = -L$(OPENCV_ARM)/lib
-LDFLAGS  += -lopencv_core -lopencv_imgproc -lopencv_imgcodecs -lpthread
+LDFLAGS  += -lopencv_objdetect -lopencv_calib3d -lopencv_features2d -lopencv_flann \
+	-lopencv_imgcodecs -lopencv_imgproc -lopencv_core -lpthread
+LDFLAGS  += -Wl,-rpath,'$$ORIGIN/lib'
 
 SRC_DIR = src
 OBJ_DIR ?= build_arm
+PACKAGE_DIR ?= dist_arm
 
-COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp
+COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp $(SRC_DIR)/face_analyzer.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server_arm: $(OBJ_DIR)/cam_server_arm
+
+package_arm: cam_server_arm
+	@mkdir -p $(PACKAGE_DIR)/lib $(PACKAGE_DIR)/assets
+	cp -a $(OBJ_DIR)/cam_server_arm $(PACKAGE_DIR)/
+	cp -a assets/haarcascade_frontalface_default.xml $(PACKAGE_DIR)/assets/
+	cp -a $(OPENCV_ARM)/lib/libopencv_*.so* $(PACKAGE_DIR)/lib/
+	@echo "ARM package ready: $(PACKAGE_DIR)"
 
 $(OBJ_DIR)/cam_server_arm: $(SRC_DIR)/main.cpp $(COMMON_SRCS) $(HEADERS)
 	@mkdir -p $(OBJ_DIR)
@@ -29,4 +45,4 @@ $(OBJ_DIR)/cam_server_arm: $(SRC_DIR)/main.cpp $(COMMON_SRCS) $(HEADERS)
 clean:
 	rm -rf $(OBJ_DIR)
 
-.PHONY: cam_server_arm clean
+.PHONY: cam_server_arm package_arm clean
