@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 #include <vector>
+#include "debug.hpp"
 
 namespace {
 
@@ -181,9 +182,9 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
             if (event.code == ABS_X || event.code == ABS_MT_POSITION_X) {
                 if (event.value > maxX_ && screenWidth_ > 1) {
                     if (!xAxisAdjusted_) {
-                        std::cerr << "[Touch] X raw value " << event.value
+                        CAM_DEBUG("[Touch] X raw value " << event.value
                                   << " exceeds advertised max; using screen max "
-                                  << screenWidth_ - 1 << std::endl;
+                                  << screenWidth_ - 1);
                         xAxisAdjusted_ = true;
                     }
                     maxX_ = screenWidth_ - 1;
@@ -193,9 +194,9 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
             if (event.code == ABS_Y || event.code == ABS_MT_POSITION_Y) {
                 if (event.value > maxY_ && screenHeight_ > 1) {
                     if (!yAxisAdjusted_) {
-                        std::cerr << "[Touch] Y raw value " << event.value
+                        CAM_DEBUG("[Touch] Y raw value " << event.value
                                   << " exceeds advertised max; using screen max "
-                                  << screenHeight_ - 1 << std::endl;
+                                  << screenHeight_ - 1);
                         yAxisAdjusted_ = true;
                     }
                     maxY_ = screenHeight_ - 1;
@@ -208,8 +209,8 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
                     point.x = normalize(currentX_, minX_, maxX_, screenWidth_);
                     point.y = normalize(currentY_, minY_, maxY_, screenHeight_);
                     touching_ = false;
-                    std::cout << "[Touch] Release raw=" << currentX_ << ',' << currentY_
-                              << " screen=" << point.x << ',' << point.y << std::endl;
+                    CAM_DEBUG("[Touch] Release raw=" << currentX_ << ',' << currentY_
+                              << " screen=" << point.x << ',' << point.y);
                     return true;
                 }
             }
@@ -220,8 +221,8 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
                 point.x = normalize(currentX_, minX_, maxX_, screenWidth_);
                 point.y = normalize(currentY_, minY_, maxY_, screenHeight_);
                 touching_ = false;
-                std::cout << "[Touch] Release raw=" << currentX_ << ',' << currentY_
-                          << " screen=" << point.x << ',' << point.y << std::endl;
+                CAM_DEBUG("[Touch] Release raw=" << currentX_ << ',' << currentY_
+                          << " screen=" << point.x << ',' << point.y);
                 return true;
             }
         }

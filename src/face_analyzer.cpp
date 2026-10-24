@@ -4,6 +4,7 @@
 #include <iostream>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include "debug.hpp"
 
 /**
  * @brief  Load a Haar cascade classifier from an XML file.
@@ -204,15 +205,19 @@ void FaceAnalysisWorker::run() {
             bool matched = false;
             for (const FaceMatch& result : analysis.matches) matched = matched || result.matched;
             if (static_cast<int>(analysis.matches.size()) != lastFaceCount || matched != lastMatched) {
-                std::cout << "[Face] detected=" << analysis.matches.size();
-                for (const FaceMatch& result : analysis.matches) {
-                    std::cout << " box=" << result.face.x << ',' << result.face.y << ','
-                              << result.face.width << 'x' << result.face.height;
-                    if (result.similarity >= 0.0)
-                        std::cout << " similarity=" << result.similarity
-                                  << " matched=" << (result.matched ? "yes" : "no");
+                CAM_DEBUG("[Face] detected=" << analysis.matches.size()
+                          << " matched=" << (matched ? "yes" : "no"));
+                CAM_DEBUG("[Face] detail count=" << analysis.matches.size());
+                if (camDebugEnabled()) {
+                    for (const FaceMatch& result : analysis.matches) {
+                        std::cerr << "[Face] box=" << result.face.x << ',' << result.face.y << ','
+                                  << result.face.width << 'x' << result.face.height;
+                        if (result.similarity >= 0.0)
+                            std::cerr << " similarity=" << result.similarity
+                                      << " matched=" << (result.matched ? "yes" : "no");
+                        std::cerr << std::endl;
+                    }
                 }
-                std::cout << std::endl;
                 lastFaceCount = static_cast<int>(analysis.matches.size());
                 lastMatched = matched;
             }

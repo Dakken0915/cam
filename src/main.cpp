@@ -16,6 +16,7 @@
 #include "http_server.hpp"
 #include "frame.hpp"
 #include "bounded_queue.hpp"
+#include "debug.hpp"
 
 namespace {
 
@@ -44,6 +45,7 @@ struct Options {
 struct PipelineState {
     std::atomic<bool> stop{false};
     std::atomic<bool> failed{false};
+    std::atomic<uint64_t> capturedFrames{0};
 
     /**
      * @brief  Record a pipeline failure and request worker shutdown.
@@ -171,7 +173,7 @@ void printHelp() {
  * @param  [in,out] capture Initialized, streaming camera object.
  * @param  [in,out] raw Destination queue for captured frames.
  * @param  [in,out] state Shared failure and shutdown state.
- * @note   Closes the raw queue on exit and records capture failures or exceptions.
+ * @note   Counts each frame returned by V4L2, closes the raw queue on exit, and records failures.
  */
 void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& state) {
     try {
@@ -187,6 +189,7 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
             frame.height = capture.height();
             frame.bytes_per_line = capture.bytesPerLine();
             frame.timestamp_us = nowUs();
+            ++state.capturedFrames;
             raw.push(std::move(frame));
         }
     } catch (const std::exception& error) {
@@ -205,7 +208,7 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
  * @param  [in,out] faceWorker Background Haar detector and optional comparator.
  * @param  [in] faceActive Whether face analysis was initialized successfully.
  * @param  [in,out] state Shared failure and shutdown state.
- * @note   Records processing exceptions and closes both queues on exit; LCD and JPEG work is serial.
+ * @note   Reports captured and processed FPS; LCD and JPEG work is serial in this thread.
  */
 void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 FramebufferDisplay& display, bool lcdActive, int quality,
@@ -214,6 +217,7 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
         /* 性能评估相关资源 */
         using Clock = std::chrono::steady_clock;
         auto statsStart = Clock::now();
+        uint64_t lastCapturedFrames = state.capturedFrames.load();
         uint64_t statsFrames = 0;  /* frame count */
         double displayMs = 0.0;
         double encodeMs = 0.0;
@@ -257,18 +261,21 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             if(elapsed >= 1.0) {
                 DisplayStats stats;
                 stats.fps    = statsFrames / elapsed;
+                const uint64_t capturedFrames = state.capturedFrames.load();
+                stats.captureFps = (capturedFrames - lastCapturedFrames) / elapsed;
                 stats.lcdMs  = displayMs / statsFrames;
                 stats.jpegMs = encodeMs / statsFrames;
 
                 if(lcdActive)
                     display.renderStats(stats);
 
-                std::cout << "[Stats] FPS=" << stats.fps
-                        << " LCD=" << stats.lcdMs << "ms"
-                        << " JPEG=" << stats.jpegMs << "ms"
-                        << std::endl;
+                CAM_DEBUG("[Stats] CAP=" << stats.captureFps
+                          << " FPS=" << stats.fps
+                          << " LCD=" << stats.lcdMs << "ms"
+                          << " JPEG=" << stats.jpegMs << "ms");
 
                 statsStart = now;
+                lastCapturedFrames = capturedFrames;
                 statsFrames = 0;
                 displayMs = 0.0;
                 encodeMs = 0.0;
@@ -296,8 +303,8 @@ void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
             TouchPoint point;
             if (!touch.waitForTap(point, 250)) continue;
             if (!display.isPhotoButton(point.x, point.y)) {
-                std::cout << "[Touch] Tap outside photo button at " << point.x << ','
-                          << point.y << std::endl;
+                CAM_DEBUG("[Touch] Tap outside photo button at " << point.x << ','
+                          << point.y);
                 continue;
             }
             std::cout << "[Touch] Photo button activated at " << point.x << ','

@@ -16,6 +16,7 @@ struct PhotoButton {
 };
 
 struct DisplayStats {
+    double captureFps = 0.0;
     double fps = 0.0;
     double lcdMs = 0.0;
     double jpegMs = 0.0;

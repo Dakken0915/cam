@@ -276,15 +276,18 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     const int screenWidth  = static_cast<int>(variable_.xres);
     const int screenHeight = static_cast<int>(variable_.yres);
 
-    // 640x480 video on a 1280x640 LCD leaves about 213 pixels on the left.
+    // Keep diagnostics inside the side margin on the board's 1024x600 mode.
     const int panelWidth  = 100;
-    const int panelHeight = 96;
+    const int panelHeight = 120;
 
     if (screenWidth < panelWidth + 8 || screenHeight < panelHeight + 8)
         return false;
 
     /* 建图 */
     cv::Mat panel(panelHeight, panelWidth, CV_8UC3, cv::Scalar(0, 0, 0)); /* black */
+
+    std::ostringstream captureText;
+    captureText << "CAP " << std::fixed << std::setprecision(1) << stats.captureFps;
 
     std::ostringstream fpsText;
     fpsText << "FPS " << std::fixed << std::setprecision(1) << stats.fps;
@@ -296,15 +299,19 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     jpegText << "JPEG " << std::fixed << std::setprecision(1) << stats.jpegMs << "ms";
 
     /* ostringstream x; x.str() 拿到完整字符串 */
-    cv::putText(panel, fpsText.str(), cv::Point(6, 22),
+    cv::putText(panel, captureText.str(), cv::Point(6, 22),
                 cv::FONT_HERSHEY_SIMPLEX, 0.38,
                 cv::Scalar(80, 255, 80), 1, cv::LINE_AA);
 
-    cv::putText(panel, lcdText.str(), cv::Point(6, 48),
+    cv::putText(panel, fpsText.str(), cv::Point(6, 48),
                 cv::FONT_HERSHEY_SIMPLEX, 0.38,
                 cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 
-    cv::putText(panel, jpegText.str(), cv::Point(6, 74),
+    cv::putText(panel, lcdText.str(), cv::Point(6, 74),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38,
+                cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+
+    cv::putText(panel, jpegText.str(), cv::Point(6, 100),
                 cv::FONT_HERSHEY_SIMPLEX, 0.38,
                 cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 

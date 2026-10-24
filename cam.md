@@ -1,4 +1,4 @@
-# i.MX6ULL 摄像头与 LCD 视频流工程文档
+## i.MX6ULL 摄像头与 LCD 视频流工程文档
 
 ## 快速编译、部署与运行
 
@@ -36,6 +36,7 @@ mkdir -p /root/photos
 cam/
 ├── AGENTS.md                 开发约定
 ├── cam.md                    技术文档
+├── src/record.md             按时间线记录方案取舍、调试与性能
 ├── Makefile                  Linux 本机构建
 ├── Makefile.arm              Buildroot ARM 交叉编译
 ├── include/                  模块接口和数据结构
@@ -93,6 +94,8 @@ flowchart LR
 LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接收连接的线程，每个已接纳客户端使用独立处理线程。
 
 两个队列满时丢最旧帧，不让内存随积压无限增长。HTTP 客户端读取最新 JPEG，慢客户端可以跳过中间帧。容量限制不能保证固定延迟；LCD 和 JPEG 在同一线程串行执行，编码耗时仍会影响显示帧率。
+
+  `[Stats] CAP` 是 V4L2 成功交付给应用的采集帧率，`FPS` 是完成显示和 JPEG 编码后进入输出队列的处理帧率。若 `CAP` 明显高于 `FPS`，表示应用处理跟不上，队列可能丢弃旧帧；若两者接近但都偏低，应继续检查摄像头实际输出速率或整体 CPU 负载。启动后的第一个统计窗口可能受初始化时序影响，比较时以之后数行的稳定值为准。
 
 当 LCD 初始化成功时，显示层在右下角绘制小型圆形白色快门按钮：白色内圆、窄黑色间隙和白色外环。触摸线程默认打开 `/dev/input/event1`；也可以用 `--touch PATH` 指定其他 evdev 设备。设备只要具备触摸按键（`BTN_TOUCH`/`BTN_LEFT`）或多点触摸跟踪 ID（`ABS_MT_TRACKING_ID`），并提供绝对 X/Y 轴即可接受。触摸按下后在圆形按钮内释放，才触发一次拍照。原始触摸范围通过 `EVIOCGABS` 读取，再线性映射到 framebuffer 可见分辨率。
 
@@ -256,6 +259,10 @@ make test_http_server
 
 测试使用独立 C++ 可执行文件和断言辅助函数，不依赖第三方测试框架。无硬件环境可分别运行视频和 V4L2 测试。修改代码后按模块选择测试；纯文档修改核对参数、链接和命令即可。
 
+### 调试日志开关
+
+诊断日志在运行时判断进程是否处于前台终端：直接前台运行时显示，使用 `&` 放到后台、重定向输出或 `nohup` 运行时自动隐藏。启动/停止、错误、触摸拍照结果和照片保存路径等运行信息始终保留；LCD 上的性能统计显示仍可用。触摸原始坐标、按钮未命中、帧异常丢弃、人脸检测变化及周期性性能日志由 `CAM_DEBUG` 运行时门控。默认后台启动：`./cam_server_arm ... &`；需要在后台临时打开诊断时使用 `CAM_DEBUG=1 ./cam_server_arm ... &`，强制关闭则使用 `CAM_DEBUG=0`。该开关不需要重新编译。
+
 ### ARM 交叉编译与部署
 
 本机 100ask Buildroot SDK 位于 `$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot`。`Makefile.arm` 默认使用该 SDK 的编译器，并将 OpenCV 前缀设为 `$HOME/opencv_arm_install`。SDK sysroot 应与板端 glibc、libstdc++ 和浮点 ABI 匹配；不要回退到 WSL Ubuntu 自带的 ARM 编译器。其他位置的 SDK 可通过 `BUILDROOT_SDK=...` 覆盖。
@@ -378,7 +385,7 @@ LCD 与网络同时输出：
 
 ### 预期日志、画面与 HTTP 接口
 
-成功启动日志示例，实际设备名称和位深可能不同：
+成功启动日志示例，实际设备名称和位深可能不同。`CAP` 表示应用从 V4L2 收到帧的速率，`FPS` 表示完成 LCD/JPEG 处理的速率：
 
 ```text
 [LCD] /dev/fb0 1280x640 16 bpp, stride=2560
@@ -389,8 +396,13 @@ LCD 与网络同时输出：
 [HTTP] Server listening on port 8080
 [Touch] Opened /dev/input/event1 range=0..4095,0..4095 mode=touch-key
 [Face] Haar cascade loaded: assets/haarcascade_frontalface_default.xml
+[Stats] CAP=30 FPS=24.8 LCD=8.6ms JPEG=12.1ms
 [Face] detected=1 box=210,80,180x180 similarity=0.83 matched=yes
 ```
+
+板端格式枚举显示：640x480 的 YUYV 和 MJPEG 都声明支持 30 FPS；800x600 的 MJPEG 也声明支持 30 FPS，1280x720 的 MJPEG 支持 30 FPS，1280x1024 的 MJPEG 支持 30 FPS。`--set-parm=30` 被接受且 `--get-parm` 报告 30 FPS，但完整稳定采集测试中 YUYV 和 MJPEG 都约为 14 FPS。由于使用 `v4l2-ctl` 单独采集仍复现，应用的 LCD/JPEG 处理不是这个 14 FPS 上限的唯一来源；优先检查 USB 连接速度、相机/驱动实际帧率、板端 CPU 和供电。V4L2 帧间隔是驱动配置值，实际吞吐仍须以完整采集测量为准。
+
+板端诊断显示摄像头通过 USB 480M 高速链路连接，排除了明显的 USB Full-Speed（12M）降速；运行程序时 CPU 约为 75% user、8% system、16% softirq，几乎没有 idle，`cam_server_arm` 约占 77% CPU。此时日志中的 `CAP` 约 9.6~10.4 FPS、处理 `FPS` 约 5.5~6.7 FPS，说明当前程序已受 i.MX6ULL CPU、JPEG 编码、LCD 写入和人脸线程的综合负载影响。`top` 本身还占用约 15% CPU，因此交互查看期间的帧率会进一步下降；性能测试应在退出 `top` 后单独进行。
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
 
@@ -455,7 +467,7 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 
 | 上板验收项 | 预期结果 |
 | --- | --- |
-| 摄像头与 LCD 初始化 | 日志报告协商尺寸、LCD 实际模式和 HTTP 端口，无异常退出 |
+| 摄像头与 LCD 初始化 | 日志报告协商尺寸、LCD 实际模式和 HTTP 端口，无异常退出；同时记录 `CAP` 与处理 `FPS` |
 | 色彩与比例 | 红绿蓝和黑白正常，画面不拉伸；640x480 到目标面板呈 853x640 居中显示 |
 | 网页与截图 | 网页持续更新；截图响应为 JPEG，板端文件与下载内容一致 |
 | 正常停机 | Ctrl-C/SIGTERM 可退出、进程结束后可重新打开设备；无需强制 SIGKILL |
@@ -489,3 +501,25 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 ### 参数调优顺序
 
 先保持 LCD 和 HTTP 配置不变，记录 `--face-interval 8` 的 CPU 占用和实际帧率；再逐步尝试 `12`、`16`，确认人脸反馈延迟仍满足需求。若仍不足，降低摄像头采集尺寸或 JPEG `--quality`，并使用 `--no-lcd` 对比显示写入开销。所有优化都应在目标板上同时记录分辨率、帧率、CPU、内存和温度，避免只根据开发机结果判断。
+
+### 板端性能隔离测试
+
+性能测试不要在持续刷新的 `top` 界面中进行。先停止旧进程，再分别运行以下模式：
+
+```sh
+# 保留软件 JPEG，禁用 LCD/触摸，并把 Haar 检测降到最低频率
+./cam_server_arm --device /dev/video1 --no-lcd --no-touch \
+  --face-interval 120 --quality 50
+
+# 降低输入尺寸，观察转换和编码负载是否随像素数下降
+./cam_server_arm --device /dev/video1 --no-lcd --no-touch \
+  --width 320 --height 240 --face-interval 120 --quality 50
+```
+
+第一组仍然较低，说明软件 JPEG 或 YUYV 转换是主要负载；第二组明显升高，说明 640x480 的像素处理量是瓶颈；重新启用 LCD 后再下降，则 framebuffer 写入是额外瓶颈。确认基线后，优先减少软件 JPEG 编码和逐像素 LCD 写入，再考虑 MJPEG 直通。
+
+本次板端 320x240、关闭 LCD、JPEG 质量 50 的实测结果为 `CAP/FPS` 约 10 FPS，JPEG 编码约 18.5~19.0ms。与 640x480 时约 10 FPS 的采集结果相比，降低分辨率主要减少了处理耗时，没有提高当前摄像头实际输出帧率；因此后续需要区分摄像头/驱动帧率限制与应用处理优化。
+
+### 摄像头格式选择
+
+YUYV 保留原始像素但占用较高的 USB 和摄像头处理带宽；MJPEG 由摄像头先压缩，通常可以降低传输带宽，并可直接复用到 HTTP 和照片保存路径。格式表中的 30 FPS 只能作为能力声明，必须用完整采集窗口测量实际吞吐；板端两种格式的单独采集都稳定在约 14 FPS，说明还需排查相机/USB/驱动端限制。确认链路后，再评估 MJPEG 直通 HTTP/拍照和独立解码到 LCD 的路径。MJPEG 仍需要解码才能显示到 framebuffer，不能保证 LCD 同样达到摄像头输出帧率。

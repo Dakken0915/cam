@@ -10,6 +10,7 @@
 #include <cerrno>
 #include <cstring>
 #include <climits>
+#include "debug.hpp"
 
 using namespace std;
 
@@ -250,7 +251,7 @@ V4l2Capture::FrameResult V4l2Capture::getFrame(vector<uint8_t>& out,
     const uint64_t required = static_cast<uint64_t>(bytes_per_line_) * (height_ - 1) +
                               static_cast<uint64_t>(width_) * 2;
     if ((buf.flags & V4L2_BUF_FLAG_ERROR) || buf.bytesused < required) {
-        cerr << "[V4L2] Dropping incomplete or corrupt frame" << endl;
+        CAM_DEBUG("[V4L2] Dropping incomplete or corrupt frame");
         return xioctl(fd_, VIDIOC_QBUF, &buf) < 0 ? FrameResult::Error : FrameResult::Timeout;
     }
 
