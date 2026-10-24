@@ -53,8 +53,8 @@ FaceAnalysis FaceAnalyzer::analyze(const cv::Mat& bgr, double threshold) {
 
     cv::Mat gray;
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-    // Detect on a smaller image to keep CPU use practical on i.MX6ULL.
-    const double detectionScale = gray.cols > 320 ? 320.0 / gray.cols : 1.0;
+    // Cap the detector input at 240 pixels wide to reduce i.MX6ULL CPU use.
+    const double detectionScale = gray.cols > 240 ? 240.0 / gray.cols : 1.0;
     cv::Mat detectionGray;
     if (detectionScale < 1.0) {
         cv::resize(gray, detectionGray, cv::Size(), detectionScale, detectionScale,

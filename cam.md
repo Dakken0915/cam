@@ -6,31 +6,31 @@
 
 ```sh
 cd /home/hxh1987370733/workspace/cam
-make -B -f Makefile.arm cam_server_arm
-file build_arm/cam_server_arm
+make -B -f Makefile.arm package_arm
+file dist_arm/cam_server_arm
 ```
 
 将产物复制到板卡并启动。`BOARD_IP` 替换为板卡地址；程序默认使用 `/dev/input/event1`：
 
 ```sh
-scp build_arm/cam_server_arm assets/haarcascade_frontalface_default.xml root@BOARD_IP:/opt/cam/
+scp -r dist_arm root@BOARD_IP:/opt/cam/
 ssh root@BOARD_IP
-cd /opt/cam
+cd /opt/cam/dist_arm
 chmod +x cam_server_arm
 mkdir -p /root/photos
-LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm \
+./cam_server_arm \
   --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 \
   --snapshot-dir /root/photos \
-  --face-cascade /opt/cam/haarcascade_frontalface_default.xml
+  --face-cascade ./assets/haarcascade_frontalface_default.xml
 ```
 
 触摸并释放圆形按钮时，应依次看到 `[Touch] Release ...`、`[Touch] Photo button activated ...` 和 `[Touch] Photo saved: /root/photos/snapshot_....jpg`；使用 `ls -lh /root/photos` 检查文件。
 
 本工程在 i.MX6ULL Linux 板卡上采集 YUYV 视频，同时输出到 LCD 和浏览器，并支持截图保存与下载。目标 LCD 为 1280x640；程序以 framebuffer 驱动报告的实际模式为准。
 
-## 1. 文件功能描述
+## 文件功能描述
 
-### 1.1 工程目录
+### 工程目录
 
 ```text
 cam/
@@ -50,13 +50,13 @@ cam/
 
 | 文件 | 职责与关键接口 |
 | --- | --- |
-| [src/main.cpp](src/main.cpp) | 解析启动参数；启动 LCD、摄像头和 HTTP；通过 `captureLoop`、`encodeLoop`、主线程发布 JPEG；协调异常及信号退出。 |
+| [src/main.cpp](src/main.cpp) | 解析启动参数；启动 LCD、摄像头、HTTP 和 `FaceAnalysisWorker`；通过 `captureLoop`、`encodeLoop`、主线程发布 JPEG；协调异常及信号退出。 |
 | [src/v4l2.cpp](src/v4l2.cpp)、[include/v4l2.hpp](include/v4l2.hpp) | `V4l2Capture` 封装格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
 | [src/jpeg_encoder.cpp](src/jpeg_encoder.cpp)、[include/jpeg_encoder.hpp](include/jpeg_encoder.hpp) | `convertToBgr` 转换 YUYV，`encodeBgr` 压缩 JPEG；`encode` 保留直接编码 YUYV 的接口。 |
 | [src/framebuffer.cpp](src/framebuffer.cpp)、[include/framebuffer.hpp](include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
 | [src/touchscreen.cpp](src/touchscreen.cpp)、[include/touchscreen.hpp](include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
 | [src/http_server.cpp](src/http_server.cpp)、[include/http_server.hpp](include/http_server.hpp) | `HttpServer` 提供网页、MJPEG 和截图，维护最新 JPEG、客户端数量和截图配额。页面 HTML/CSS/JavaScript 内嵌在源文件中。 |
-| [src/face_analyzer.cpp](src/face_analyzer.cpp)、[include/face_analyzer.hpp](include/face_analyzer.hpp) | 使用 OpenCV Haar cascade 检测人脸，并对检测到的人脸执行归一化灰度图相似度比对。 |
+| [src/face_analyzer.cpp](src/face_analyzer.cpp)、[include/face_analyzer.hpp](include/face_analyzer.hpp) | 使用 OpenCV Haar cascade 检测人脸，并对检测到的人脸执行归一化灰度图相似度比对；`FaceAnalysisWorker` 在后台线程按间隔处理抽样帧。 |
 | [assets/haarcascade_frontalface_default.xml](assets/haarcascade_frontalface_default.xml) | OpenCV `haarcascade_frontalface_default` 模型；运行时按 `--face-cascade` 加载。 |
 | [include/frame.hpp](include/frame.hpp) | `Frame` 保存数据、序号、尺寸、行跨度和单调时钟时间戳。 |
 | [include/bounded_queue.hpp](include/bounded_queue.hpp) | `BoundedQueue<T>` 提供线程安全的 `push`、阻塞 `take` 和 `close`。 |
@@ -68,9 +68,9 @@ cam/
 
 仓库包含用户态应用，不包含设备树、摄像头驱动、LCD 驱动或板级根文件系统。
 
-## 2. 实现方式与收益
+## 实现方式与收益
 
-### 2.1 数据流与线程分工
+### 数据流与线程分工
 
 ```mermaid
 flowchart LR
@@ -98,7 +98,7 @@ LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接�
 
 触摸拍照和 HTTP `/snapshot` 共用同一个 JPEG 快照保存函数，因此命名、配额、目录创建、写盘锁和错误结果一致。默认目录为 `/root/photos`；目录不可写、尚无首帧或达到张数配额时，触摸线程只记录错误，不会写入空文件。圆形按钮只绘制到 LCD 显存，不会混入 JPEG 或网页视频。
 
-### 2.2 采集格式、缓冲区与数据有效性
+### 采集格式、缓冲区与数据有效性
 
 打开设备后，依次执行 `QUERYCAP`、`S_FMT`、`REQBUFS`、`QUERYBUF`、`mmap`、`QBUF` 和 `STREAMON`。默认申请 4 个驱动缓冲区，实际使用驱动返回的数量。设备提供 `V4L2_CAP_DEVICE_CAPS` 时按 `device_caps` 判断当前节点能力。
 
@@ -114,7 +114,7 @@ MMAP 将驱动缓冲区映射到用户空间；应用仍会复制一份帧数据
 最小字节数 = (height - 1) * bytes_per_line + width * 2
 ```
 
-### 2.3 BGR 复用与 LCD 输出
+### BGR 复用与 LCD 输出
 
 OpenCV 使用 `CV_8UC2` 和实际步长读取 YUYV，通过 `COLOR_YUV2BGR_YUYV` 转为 `CV_8UC3`。每帧只转换一次；LCD 使用转换结果，JPEG 编码也使用该结果。
 
@@ -130,7 +130,7 @@ offset = (yoffset + y) * line_length + (xoffset + x) * (bits_per_pixel / 8)
 
 程序使用驱动现有显示模式，不设置 LCD 时序、背光、垂直同步或翻页。退出时解除映射，不主动清屏或恢复先前画面。
 
-### 2.4 模块接口与所有权
+### 模块接口与所有权
 
 | 接口或数据 | 使用约定 |
 | --- | --- |
@@ -144,7 +144,7 @@ offset = (yoffset + y) * line_length + (xoffset + x) * (bits_per_pixel / 8)
 | `HttpServer::captureSnapshot` | 供触摸线程调用的本地快照入口；复用 `/snapshot` 的保存逻辑和 `SnapshotResult`。 |
 | `Touchscreen::waitForTap` | 只在触摸释放时返回归一化坐标；超时返回 false。 |
 
-### 2.5 HTTP、截图与资源限制
+### HTTP、截图与资源限制
 
 HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。查询参数不影响端点匹配。MJPEG 使用 `multipart/x-mixed-replace; boundary=frame`，每个分段包含 JPEG 长度。
 
@@ -161,23 +161,23 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 
 截图配额和客户端上限通过 `HttpServer` 构造参数设置，当前没有对应命令行选项。服务没有认证、TLS 或访问授权；应在可控网络运行，公网部署需另外配置访问控制。
 
-### 2.6 退出行为与当前限制
+### 退出行为与当前限制
 
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
 目前不支持 MJPEG-only、UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。JPEG 使用 CPU 编码；单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
 
-### 2.7 Haar 人脸检测与灰度图比对
+### Haar 人脸检测与灰度图比对
 
-`FaceAnalyzer` 在 BGR 帧中先转换灰度图，再使用 OpenCV `CascadeClassifier` 和 `haarcascade_frontalface_default.xml` 查找正面人脸。为降低 i.MX6ULL 的 CPU 压力，宽度超过 320 像素时先缩小检测图，检测框再映射回摄像头原始坐标；原始 BGR 帧和 JPEG 尺寸不被改变。`FaceAnalysisWorker` 在独立工作线程检测，编码线程每次只复制抽样帧并立即继续 LCD/JPEG 输出；邮箱只保存一张待处理帧，忙碌时用新帧覆盖旧帧，避免检测结果排队积累。默认每 8 帧提交一次，可用 `--face-interval N` 调整为每 1..120 帧；间隔越大，平均 CPU 开销越低，但人脸出现/离开的检测反馈越慢。线程隔离可以减少检测耗时对视频流水线的直接阻塞，但不能增加 i.MX6ULL 的总 CPU 算力。检测日志只在检测数量或匹配状态变化时输出，避免刷屏。
+`FaceAnalyzer` 在 BGR 帧中先转换灰度图，再使用 OpenCV `CascadeClassifier` 和 `haarcascade_frontalface_default.xml` 查找正面人脸。宽度超过 240 像素时将检测图缩至 240 像素宽，例如 640x480 缩至 240x180，然后把检测框换算回原始坐标；LCD 和 JPEG 仍使用原始帧。降低检测分辨率可显著减少 Haar 的窗口扫描计算量，但远处或画面中较小的人脸更容易漏检。`FaceAnalysisWorker` 在独立工作线程检测，编码线程每次只复制抽样帧并立即继续 LCD/JPEG 输出；邮箱只保存一张待处理帧，忙碌时用新帧覆盖旧帧，避免检测结果排队积累。默认每 8 帧提交一次，可用 `--face-interval N` 调整为每 1..120 帧；间隔越大，平均 CPU 开销越低，但人脸出现/离开的检测反馈越慢。线程隔离可以减少检测耗时对视频流水线的直接阻塞，但不能增加 i.MX6ULL 的总 CPU 算力。检测日志只在检测数量或匹配状态变化时输出，避免刷屏。
 
 如果通过 `--face-reference PATH` 提供参考图片，每个检测框会被裁剪并统一到 64x64 灰度图，经过直方图均衡化和 0..1 归一化，然后计算平均绝对差，得到 `1 - mean(abs(a-b))` 的 0..1 相似度。`--gray-threshold` 以百分比输入，默认 75；相似度达到阈值时日志标记 `matched=yes`。这是一种便于部署和学习的图像相似度示例，不是身份认证，也不具备深度人脸识别对姿态、光照和遮挡的鲁棒性。未提供参考图时仍执行检测，但不输出有效相似度。
 
 模型或参考图加载失败只会禁用人脸分析，摄像头、LCD 和 HTTP 视频流仍可继续运行；部署时必须把 XML 文件与 ARM 可执行文件一起复制到板端，并从包含 `assets/` 的目录启动，或使用绝对模型路径。
 
-## 3. 学习指南
+## 学习指南
 
-### 3.1 建议学习顺序
+### 建议学习顺序
 
 | 阶段 | 重点概念 | 对应源码与练习 |
 | --- | --- | --- |
@@ -189,7 +189,7 @@ Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列
 | 6. 并发 | mutex、condition_variable、atomic、信号安全、线程 join | 阅读队列和主流程，追踪采集故障如何让主线程结束等待。 |
 | 7. 网络与板端 | TCP 短写、HTTP multipart、SIGPIPE、交叉编译、动态链接 | 阅读 `writeAll/serveStream/stop`，对照 SDK sysroot 和目标动态库部署应用。 |
 
-### 3.2 关键知识点
+### 关键知识点
 
 - 区分图像宽度、每行字节数和整帧有效长度；`width * height * 2` 不能覆盖所有带填充的 YUYV 帧。
 - 区分用户态 MMAP 虚拟地址与物理显存地址，不能把 `smem_start` 直接当作普通指针写入。
@@ -197,7 +197,7 @@ Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列
 - 区分单调时钟帧时间戳与系统本地时间截图命名。板卡未校时会影响文件名日期。
 - 区分目标 ARM 库与本机 x86 库；OpenCV、libstdc++、C 库、浮点 ABI 和动态加载器须与板端系统兼容。
 
-### 3.3 Function comment convention
+### Function comment convention
 
 Follow the root `AGENTS.md` rule for every function and important callback. Use English Doxygen block comments with `@brief`, parameter directions, return values, and optional notes or warnings:
 
@@ -216,9 +216,9 @@ Interface comments describe ownership, cache reuse, exceptions, and output valid
 
 Validation: all 147 function comment blocks use English `@brief` descriptions. The application and all three test executables rebuilt successfully with `-Wall -Wextra`. Preprocessed output for the existing nine C++ source/test files remained identical during the previous comment-only correction; the new touchscreen implementation is covered by the current application build. Video and simulated V4L2 tests were rerun after this feature update; real touchscreen and LCD behavior still require board testing.
 
-## 4. 工程使用说明、编译命令与预期效果
+## 工程使用说明、编译命令与预期效果
 
-### 4.1 运行前提
+### 运行前提
 
 | 环境 | 必要条件 |
 | --- | --- |
@@ -231,7 +231,7 @@ Validation: all 147 function comment blocks use English `@brief` descriptions. T
 
 LCD 的 1280x640 分辨率、像素时钟、同步极性和引脚配置由板卡 BSP/设备树完成。触摸设备节点和坐标轴范围由触摸驱动注册。避免 fbcon、图形服务或其他进程同时写同一显存；程序运行中不要更改 framebuffer 模式。
 
-### 4.2 Linux 本机构建与测试
+### Linux 本机构建与测试
 
 在仓库根目录执行：
 
@@ -256,7 +256,7 @@ make test_http_server
 
 测试使用独立 C++ 可执行文件和断言辅助函数，不依赖第三方测试框架。无硬件环境可分别运行视频和 V4L2 测试。修改代码后按模块选择测试；纯文档修改核对参数、链接和命令即可。
 
-### 4.3 ARM 交叉编译与部署
+### ARM 交叉编译与部署
 
 本机 100ask Buildroot SDK 位于 `$HOME/toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot`。`Makefile.arm` 默认使用该 SDK 的编译器，并将 OpenCV 前缀设为 `$HOME/opencv_arm_install`。SDK sysroot 应与板端 glibc、libstdc++ 和浮点 ABI 匹配；不要回退到 WSL Ubuntu 自带的 ARM 编译器。其他位置的 SDK 可通过 `BUILDROOT_SDK=...` 覆盖。
 
@@ -296,6 +296,13 @@ mkdir -p /root/photos
   --face-cascade ./assets/haarcascade_frontalface_default.xml
 ```
 
+若默认的 `$HOME/opencv_arm_install` 尚未包含 `objdetect`，使用已完成构建的 ARM OpenCV 前缀覆盖变量：
+
+```sh
+make -B -f Makefile.arm package_arm \
+  OPENCV_ARM=/home/hxh1987370733/workspace/cam/opencv_arm_buildroot_install
+```
+
 `dist_arm/lib/` 会包含 `libopencv_objdetect.so.413`、`libopencv_calib3d.so.413`、`libopencv_features2d.so.413`、`libopencv_flann.so.413` 及 core/imgproc/imgcodecs。板端已有同名旧库时也优先使用该目录中的匹配版本；若板端缺少 JPEG `libjpeg.so.8`，还需要从同一 SDK/根文件系统补齐该库。
 
 如果 OpenCV 已经在工程目录下的临时前缀完成构建，需要在可写宿主机终端把它覆盖到默认前缀，再编译应用：
@@ -310,7 +317,7 @@ make -B -f Makefile.arm cam_server_arm
 
 该 ARM 规则已在 `Makefile.arm` 内固定使用工程上级的 `../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot` 和 `../../opencv_arm_install`，因此不需要在命令行重复传入路径；路径以 Makefile 所在目录计算，从其他工作目录调用也有效。命令链接 `opencv_objdetect`、`opencv_calib3d`、`opencv_features2d`、`opencv_flann`、`opencv_imgcodecs`、`opencv_imgproc`、`opencv_core` 和 pthread；OpenCV 必须启用 JPEG、`calib3d` 与 `objdetect`。Makefile 会在编译前检查 `objdetect.hpp` 和 `libopencv_objdetect`，缺少时给出重建提示。需要独立输出目录时可追加 `OBJ_DIR=build_arm_100ask`；构建应用与 OpenCV 时应使用同一个 SDK，避免引入比板端更新的 GLIBC/GLIBCXX 符号版本。
 
-把 `build_arm/cam_server_arm` 和匹配的运行库部署至板卡。例如将程序放到 `/opt/cam/`、私有动态库放到 `/opt/cam/lib/` 后，在板端执行：
+如果不使用 `package_arm`，也可以手动部署 `build_arm/cam_server_arm` 和匹配的运行库。例如将程序放到 `/opt/cam/`、私有动态库放到 `/opt/cam/lib/` 后，在板端执行：
 
 ```sh
 cd /opt/cam
@@ -321,7 +328,7 @@ LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0
 
 自定义库路径示例应包含全部依赖；若库已安装在系统标准搜索路径，可省略 `LD_LIBRARY_PATH`。切换 SDK 或 OpenCV 安装路径后，先执行 `make -f Makefile.arm clean` 再构建，避免沿用旧二进制。两个构建文件的 clean 分别删除各自输出目录。
 
-### 4.4 启动参数与常用模式
+### 启动参数与常用模式
 
 | 参数 | 默认值 | 约束与行为 |
 | --- | --- | --- |
@@ -369,7 +376,7 @@ LCD 与网络同时输出：
 
 直接运行 `./cam_server_arm` 会尝试可选 LCD 和 `/dev/input/event1` 触摸设备；失败时分别打印提示并继续 HTTP/摄像头功能。显式 `--fb /dev/fb0` 或 `--touch PATH` 失败则返回 1。正常停机使用 Ctrl-C，后台进程可用 `kill -TERM <PID>`。
 
-### 4.5 预期日志、画面与 HTTP 接口
+### 预期日志、画面与 HTTP 接口
 
 成功启动日志示例，实际设备名称和位深可能不同：
 
@@ -411,7 +418,7 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 
 确认截图响应为 200 且类型为 `image/jpeg` 后再打开 `snapshot.jpg`；失败响应也会被 curl 保存。视频请求达到示例中的 3 秒时限后超时退出属于预期行为。
 
-### 4.6 故障排查
+### 故障排查
 
 | 现象或日志 | 排查步骤 |
 | --- | --- |
@@ -440,11 +447,11 @@ curl --max-time 3 -o stream.mjpeg http://192.168.1.100:8080/stream
 
 诊断命令依赖板端工具是否安装。不要直接修改像素时钟、清空截图或解除控制台绑定来替代定位问题。
 
-### 4.7 测试证据与上板验收
+### 测试证据与上板验收
 
 本次加入 Haar 人脸检测、可选灰度图相似度比对、异步检测线程和每 N 帧抽样；`make -B cam_server build/test_face_analyzer test_video test_v4l2` 已编译成功，`Face analyzer tests passed`、`Video pipeline tests passed` 和 `V4L2 capture tests passed` 已在主机侧验证。`./build/cam_server --help` 已确认人脸参数。`make -B -f Makefile.arm package_arm` 可重新构建并打包 ARM 程序、模型和 OpenCV 动态库。真实摄像头、LCD 和 i.MX6ULL 上的 FPS/CPU 变化仍需实测。
 
-HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 构建因现有 OpenCV 安装缺少 `objdetect` 尚未完成，真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
+HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新编译，没有取得新的 TCP 运行结果。当前环境没有摄像头和 LCD；ARM 打包已使用包含 `objdetect` 的 OpenCV 前缀完成，若默认 `$HOME/opencv_arm_install` 缺少该模块，请按 ARM 构建章节传入 `OPENCV_ARM`。真实显示、触摸输入、板端照片写入与长时间运行仍待上板验证。
 
 | 上板验收项 | 预期结果 |
 | --- | --- |
@@ -460,3 +467,25 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 | 灰度图比对 | 指定参考图后，检测日志输出 0..1 相似度和 `matched=yes/no`；改变 `--gray-threshold` 可调整判定边界 |
 
 性能和稳定性数据需保留实测记录后再补充，当前没有固定帧率、延迟或持续运行时长的达标承诺。
+
+## 优化方法与原理
+
+### 视频流水线解耦
+
+采集、图像处理、LCD 刷新、JPEG 编码和 HTTP 发送通过有界队列分开。队列容量固定为 3，满载时丢弃最旧帧，让延迟保持在可控范围内；HTTP 客户端只读取最新 JPEG，慢客户端不会阻塞摄像头。代价是高负载时会丢帧，不能把队列无限增大来换取表面上的完整帧数。
+
+### 低分辨率 Haar 检测
+
+人脸分析前将检测图宽度限制为 240 像素，640x480 输入通常缩放为 240x180；检测框再映射回原始 BGR 帧。Haar 分类器的滑动窗口数量随图像面积增长，缩放能明显降低 i.MX6ULL 的 CPU 占用；代价是远处的小脸更容易漏检。LCD 和 JPEG 仍保留原始分辨率，因此显示质量不受检测缩放影响。
+
+### 每八帧抽样与异步任务
+
+`FaceAnalysisWorker` 默认每 8 个处理帧提交一次检测任务，编码线程只复制被抽样的 BGR 帧后立即继续输出。工作线程只保留一张待处理帧，新任务到来时覆盖旧任务，避免检测积压造成延迟不断增长。可用 `--face-interval 12` 或 `--face-interval 16` 进一步降低平均负载；需要更快反馈时可设为 `1`，但 CPU 占用会明显上升。
+
+### 多进程方案的适用边界
+
+当前实现使用线程共享内存，抽样帧只需一次受控复制。若改成多进程，需要通过共享内存、管道或 Unix socket 传递图像；一张 640x480 BGR 帧约 900 KiB，频繁复制和序列化会增加内存带宽及同步开销。在只有少量 CPU 核心的 i.MX6ULL 上，多进程不一定比当前异步线程更快，只有当检测库或驱动需要独立地址空间、且能使用独立 CPU 核心时才值得评估。
+
+### 参数调优顺序
+
+先保持 LCD 和 HTTP 配置不变，记录 `--face-interval 8` 的 CPU 占用和实际帧率；再逐步尝试 `12`、`16`，确认人脸反馈延迟仍满足需求。若仍不足，降低摄像头采集尺寸或 JPEG `--quality`，并使用 `--no-lcd` 对比显示写入开销。所有优化都应在目标板上同时记录分辨率、帧率、CPU、内存和温度，避免只根据开发机结果判断。
