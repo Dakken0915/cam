@@ -9,6 +9,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <iomanip>
 #include <opencv2/imgproc.hpp>
 
 namespace {
@@ -60,6 +61,7 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
                                    const fb_var_screeninfo& variable) {
     reset();
     const uint32_t bits = variable.bits_per_pixel;
+    /* 合法性校验 */
     if (!memory || fixed.type != FB_TYPE_PACKED_PIXELS ||
         fixed.visual != FB_VISUAL_TRUECOLOR || variable.nonstd || variable.grayscale ||
         variable.rotate || (variable.vmode & FB_VMODE_YWRAP) ||
@@ -67,6 +69,7 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
         !variable.xres || !variable.yres || variable.xres > INT_MAX ||
         variable.yres > INT_MAX) return false;
 
+    /* 计算画面边界，显存范围 */
     const uint64_t right = static_cast<uint64_t>(variable.xoffset) + variable.xres;
     const uint64_t bottom = static_cast<uint64_t>(variable.yoffset) + variable.yres;
     const uint64_t rowBytes = right * (bits / 8);
@@ -102,7 +105,8 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
  * @note   Preserves aspect ratio, row padding, and nonvisible pages; OpenCV errors propagate.
  */
 bool FramebufferSurface::render(const cv::Mat& bgr) {
-    if (!memory_ || bgr.empty() || bgr.type() != CV_8UC3) return false;
+    if (!memory_ || bgr.empty() || bgr.type() != CV_8UC3)
+        return false;
     const int screenWidth = static_cast<int>(variable_.xres);
     const int screenHeight = static_cast<int>(variable_.yres);
     int width = screenWidth;
@@ -127,6 +131,7 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
                 (static_cast<size_t>(variable_.yoffset) + y) * fixed_.line_length +
                 static_cast<size_t>(variable_.xoffset) * bytes;
             for (int x = 0; x < screenWidth; ++x) {
+                /* 刷成底色 */
                 std::memcpy(row + x * bytes, &alpha_, bytes);
             }
         }
@@ -264,6 +269,59 @@ void FramebufferSurface::drawPhotoButton() {
     }
 }
 
+bool FramebufferSurface::renderStats(const DisplayStats& stats) {
+    if(!memory_)
+        return false;
+
+    const int screenWidth  = static_cast<int>(variable_.xres);
+    const int screenHeight = static_cast<int>(variable_.yres);
+
+    // 640x480 video on a 1280x640 LCD leaves about 213 pixels on the left.
+    const int panelWidth  = 100;
+    const int panelHeight = 96;
+
+    if (screenWidth < panelWidth + 8 || screenHeight < panelHeight + 8)
+        return false;
+
+    /* 建图 */
+    cv::Mat panel(panelHeight, panelWidth, CV_8UC3, cv::Scalar(0, 0, 0)); /* black */
+
+    std::ostringstream fpsText;
+    fpsText << "FPS " << std::fixed << std::setprecision(1) << stats.fps;
+
+    std::ostringstream lcdText;
+    lcdText << "LCD " << std::fixed << std::setprecision(1) << stats.lcdMs << "ms";
+
+    std::ostringstream jpegText;
+    jpegText << "JPEG " << std::fixed << std::setprecision(1) << stats.jpegMs << "ms";
+
+    /* ostringstream x; x.str() 拿到完整字符串 */
+    cv::putText(panel, fpsText.str(), cv::Point(6, 22),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38,
+                cv::Scalar(80, 255, 80), 1, cv::LINE_AA);
+
+    cv::putText(panel, lcdText.str(), cv::Point(6, 48),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38,
+                cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+
+    cv::putText(panel, jpegText.str(), cv::Point(6, 74),
+                cv::FONT_HERSHEY_SIMPLEX, 0.38,
+                cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+
+    /* draw */
+    const int offsetX = 4;
+    const int offsetY = 8;
+
+    for(int y = 0; y < panel.rows; ++y) {
+        for(int x = 0; x < panel.cols; ++x) {
+            const cv::Vec3b& pixel = panel.at<cv::Vec3b>(y, x);
+            writePixel(offsetX + x, offsetY + y,
+                       packPixel(pixel[0], pixel[1], pixel[2]));
+        }
+    }
+    return true;
+}
+
 /**
  * @brief  Unbind borrowed memory and release the scaling cache.
  * @note   Does not free the caller's memory or clear the display.
@@ -354,6 +412,10 @@ PhotoButton FramebufferDisplay::photoButton() const {
  */
 bool FramebufferDisplay::isPhotoButton(int x, int y) const {
     return surface_.isPhotoButton(x, y);
+}
+
+bool FramebufferDisplay::renderStats(const DisplayStats& stats) {
+    return surface_.renderStats(stats);
 }
 
 /**

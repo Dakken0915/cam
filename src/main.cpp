@@ -211,6 +211,13 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 FramebufferDisplay& display, bool lcdActive, int quality,
                 FaceAnalysisWorker& faceWorker, bool faceActive, PipelineState& state) {
     try {
+        /* 性能评估相关资源 */
+        using Clock = std::chrono::steady_clock;
+        auto statsStart = Clock::now();
+        uint64_t statsFrames = 0;  /* frame count */
+        double displayMs = 0.0;
+        double encodeMs = 0.0;
+
         JpegEncoder encoder;
         Frame frame;
         while (raw.take(frame)) {
@@ -222,15 +229,50 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             const cv::Mat& bgr = encoder.convertToBgr(frame.data.data(), frame.width,
                 frame.height, static_cast<size_t>(frame.bytes_per_line));
             if (faceActive) faceWorker.submit(bgr);
-            if (lcdActive && !display.render(bgr))
-                throw std::runtime_error("LCD rendering failed");
+
+            /* LCD 绘制 */
+            if (lcdActive) {
+                /* 统计帧缓冲区渲染输出到 LCD 屏幕的耗时 */
+                const auto displayStart = Clock::now();
+                if(!display.render(bgr))
+                    throw std::runtime_error("LCD rendering failed");
+                displayMs += std::chrono::duration<double, std::milli>(Clock::now() - displayStart).count();
+            }
             Frame encoded;
             encoded.sequence = frame.sequence;
             encoded.width = frame.width;
             encoded.height = frame.height;
             encoded.timestamp_us = frame.timestamp_us;
+            /* 编码处计时 */
+            const auto encodeStart = Clock::now();
             encoded.data = encoder.encodeBgr(bgr, quality);
+            encodeMs += std::chrono::duration<double, std::milli>(Clock::now() - encodeStart).count();
             jpeg.push(std::move(encoded));
+
+            ++statsFrames;
+            const auto now = Clock::now();
+            const double elapsed = std::chrono::duration<double>(now - statsStart).count();
+
+            /* 性能参数计算 */
+            if(elapsed >= 1.0) {
+                DisplayStats stats;
+                stats.fps    = statsFrames / elapsed;
+                stats.lcdMs  = displayMs / statsFrames;
+                stats.jpegMs = encodeMs / statsFrames;
+
+                if(lcdActive)
+                    display.renderStats(stats);
+
+                std::cout << "[Stats] FPS=" << stats.fps
+                        << " LCD=" << stats.lcdMs << "ms"
+                        << " JPEG=" << stats.jpegMs << "ms"
+                        << std::endl;
+
+                statsStart = now;
+                statsFrames = 0;
+                displayMs = 0.0;
+                encodeMs = 0.0;
+            }
         }
     } catch (const std::exception& error) {
         state.fail(error.what());
@@ -287,9 +329,9 @@ void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
 int run(const Options& options) {
     FaceAnalyzer faceAnalyzer;
     const bool faceCascadeLoaded = faceAnalyzer.loadCascade(options.faceCascade);
-    const bool faceReferenceLoaded = options.faceReference.empty() ||
+    const bool faceReferenceLoaded = options.faceReference.empty() ||   /* 传了参考图路径 不执行locaRefer */
                                      faceAnalyzer.loadReference(options.faceReference);
-    const bool faceActive = faceCascadeLoaded && faceReferenceLoaded;
+    const bool faceActive = faceCascadeLoaded && faceReferenceLoaded;   /* 检测器xml加载成功并且加载了参考人脸 */
     if (!faceActive)
         std::cerr << "[Face] Face analysis disabled; video pipeline will continue\n";
     const double grayThreshold = options.grayThresholdPercent / 100.0;

@@ -15,6 +15,12 @@ struct PhotoButton {
     int height = 0;
 };
 
+struct DisplayStats {
+    double fps = 0.0;
+    double lcdMs = 0.0;
+    double jpegMs = 0.0;
+};
+
 // Borrowed display memory also supports rendering tests without LCD hardware.
 class FramebufferSurface {
 public:
@@ -62,6 +68,14 @@ public:
      * @retval false The coordinate is outside or the button is unavailable.
      */
     bool isPhotoButton(int x, int y) const;
+    /**
+     * @brief  Draw performance statistics in the unused LCD side margin.
+     * @param  [in] stats Current FPS and processing time values.
+     * @retval true The statistics were rendered successfully.
+     * @retval false The framebuffer is unavailable or the margin is too small.
+     * @note   The overlay is written directly to the framebuffer and is not included in JPEG output.
+     */
+    bool renderStats(const DisplayStats& stats);
     /**
      * @brief  Unbind borrowed memory and release the scaling cache.
      * @note   Does not free the caller's memory or clear the display.
@@ -138,6 +152,13 @@ public:
      * @retval false The coordinate is outside the button or the device is unopened.
      */
     bool isPhotoButton(int x, int y) const;
+    /**
+     * @brief  Render performance statistics on the LCD overlay area.
+     * @param  [in] stats Current display and encoding statistics.
+     * @retval true The statistics were rendered.
+     * @retval false The framebuffer is not available.
+     */
+    bool renderStats(const DisplayStats& stats);
     /**
      * @brief  Unbind and unmap display memory, then close the device.
      * @note   Safe to call repeatedly; does not clear the screen or restore its previous contents.
