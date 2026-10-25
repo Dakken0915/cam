@@ -10,6 +10,11 @@ using namespace std;
 
 class V4l2Capture {
 public:
+    enum class PixelFormat {
+        YUYV,
+        MJPEG
+    };
+
     enum class FrameResult {
         Frame,
         Timeout,
@@ -34,15 +39,17 @@ public:
     V4l2Capture& operator=(const V4l2Capture&) = delete;
 
     /**
-     * @brief  Open a camera and negotiate progressive YUYV capture.
+     * @brief  Open a camera and negotiate progressive YUYV or MJPEG capture.
      * @param  [in] device Camera device path.
      * @param  [in] width Requested positive, even image width.
      * @param  [in] height Requested positive image height.
+     * @param  [in] format Requested camera pixel format.
      * @retval true The camera is open and the negotiated format is valid.
      * @retval false Device access, capability checks, or format negotiation failed.
      * @note   Closes any previous device; width(), height(), and bytesPerLine() report the negotiated geometry.
      */
-    bool open(const string& device = "/dev/video0", int width = 640, int height = 480);
+    bool open(const string& device = "/dev/video0", int width = 640, int height = 480,
+              PixelFormat format = PixelFormat::YUYV);
 
     /**
      * @brief  Map the camera buffers and start streaming capture.
@@ -60,7 +67,7 @@ public:
 
     /**
      * @brief  Wait for and copy a complete YUYV frame before returning its buffer.
-     * @param  [out] out Owned copy of the captured YUYV payload.
+     * @param  [out] out Owned copy of the captured YUYV or MJPEG payload.
      * @param  [out] sequence Sequence number reported by the camera driver.
      * @param  [in] timeoutMs Nonnegative poll timeout in milliseconds.
      * @retval Frame A complete frame and its sequence are available.
@@ -94,6 +101,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     int bytes_per_line_ = 0;
+    PixelFormat pixel_format_ = PixelFormat::YUYV;
     bool streaming_ = false;
 
     struct Buffer {

@@ -32,15 +32,16 @@ int V4l2Capture::xioctl(int fd, unsigned long request, void* arg) {
 }
 
 /**
- * @brief  Open a camera and negotiate progressive YUYV capture.
+ * @brief  Open a camera and negotiate progressive YUYV or MJPEG capture.
  * @param  [in] device Camera device path.
  * @param  [in] width Requested positive, even image width.
  * @param  [in] height Requested positive image height.
+ * @param  [in] format Requested camera pixel format.
  * @retval true The camera is open and the negotiated format is valid.
  * @retval false Device access, capability checks, or format negotiation failed.
  * @note   Closes any previous device; width(), height(), and bytesPerLine() report the negotiated geometry.
  */
-bool V4l2Capture::open(const string& device, int width, int height) {
+bool V4l2Capture::open(const string& device, int width, int height, PixelFormat format) {
     stop();
     if (width <= 0 || height <= 0 || width % 2 || width > INT_MAX / 2) return false;
     // Open the camera device.
@@ -84,7 +85,9 @@ bool V4l2Capture::open(const string& device, int width, int height) {
     fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     fmt.fmt.pix.width       = width;
     fmt.fmt.pix.height      = height;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV;
+    const uint32_t requestedFormat = format == PixelFormat::MJPEG
+        ? V4L2_PIX_FMT_MJPEG : V4L2_PIX_FMT_YUYV;
+    fmt.fmt.pix.pixelformat = requestedFormat;
     fmt.fmt.pix.field       = V4L2_FIELD_NONE;    // Progressive scan.
     if(xioctl(fd_, VIDIOC_S_FMT, &fmt) < 0) {
         cerr << "[V4L2] 设置格式失败" << endl;
@@ -93,8 +96,8 @@ bool V4l2Capture::open(const string& device, int width, int height) {
         return false;
     }
 
-    if(fmt.fmt.pix.pixelformat != V4L2_PIX_FMT_YUYV) {
-        cerr << "[V4L2] Driver did not accept YUYV format" << endl;
+    if(fmt.fmt.pix.pixelformat != requestedFormat) {
+        cerr << "[V4L2] Driver did not accept requested pixel format" << endl;
         ::close(fd_);
         fd_ = -1;
         return false;
@@ -104,7 +107,8 @@ bool V4l2Capture::open(const string& device, int width, int height) {
     if (!fmt.fmt.pix.width || !fmt.fmt.pix.height || fmt.fmt.pix.width % 2 ||
         fmt.fmt.pix.width > INT_MAX / 2 || fmt.fmt.pix.height > INT_MAX ||
         fmt.fmt.pix.bytesperline > INT_MAX ||
-        (fmt.fmt.pix.bytesperline && fmt.fmt.pix.bytesperline < fmt.fmt.pix.width * 2) ||
+        (format == PixelFormat::YUYV && fmt.fmt.pix.bytesperline &&
+         fmt.fmt.pix.bytesperline < fmt.fmt.pix.width * 2) ||
         fmt.fmt.pix.field != V4L2_FIELD_NONE) {
         cerr << "[V4L2] Invalid geometry, stride or interlaced format" << endl;
         stop();
@@ -113,8 +117,11 @@ bool V4l2Capture::open(const string& device, int width, int height) {
     width_ = fmt.fmt.pix.width;
     height_ = fmt.fmt.pix.height;
     bytes_per_line_ = fmt.fmt.pix.bytesperline;
-    if (bytes_per_line_ <= 0) bytes_per_line_ = width_ * 2;
-    cout << "[V4L2] 分辨率为" << width_ << "x" << height_ << " YUYV" << endl;
+    pixel_format_ = format;
+    if (pixel_format_ == PixelFormat::YUYV && bytes_per_line_ <= 0)
+        bytes_per_line_ = width_ * 2;
+    cout << "[V4L2] 分辨率为" << width_ << "x" << height_ << ' '
+         << (pixel_format_ == PixelFormat::MJPEG ? "MJPEG" : "YUYV") << endl;
 
     return true;
 }
@@ -204,8 +211,8 @@ bool V4l2Capture::start() {
 }
 
 /**
- * @brief  Wait for and copy a complete YUYV frame before returning its buffer.
- * @param  [out] out Owned copy of the captured YUYV payload.
+ * @brief  Wait for and copy a complete frame before returning its V4L2 buffer.
+ * @param  [out] out Owned copy of the captured YUYV or MJPEG payload.
  * @param  [out] sequence Sequence number reported by the camera driver.
  * @param  [in] timeoutMs Nonnegative poll timeout in milliseconds.
  * @retval Frame A complete frame and its sequence are available.
@@ -248,8 +255,10 @@ V4l2Capture::FrameResult V4l2Capture::getFrame(vector<uint8_t>& out,
             return FrameResult::Error;
         return FrameResult::Error;
     }
-    const uint64_t required = static_cast<uint64_t>(bytes_per_line_) * (height_ - 1) +
-                              static_cast<uint64_t>(width_) * 2;
+    const uint64_t required = pixel_format_ == PixelFormat::YUYV
+        ? static_cast<uint64_t>(bytes_per_line_) * (height_ - 1) +
+              static_cast<uint64_t>(width_) * 2
+        : 1;
     if ((buf.flags & V4L2_BUF_FLAG_ERROR) || buf.bytesused < required) {
         CAM_DEBUG("[V4L2] Dropping incomplete or corrupt frame");
         return xioctl(fd_, VIDIOC_QBUF, &buf) < 0 ? FrameResult::Error : FrameResult::Timeout;
@@ -294,6 +303,7 @@ void V4l2Capture::stop() {
     ::close(fd_);
     fd_ = -1;
     width_ = height_ = bytes_per_line_ = 0;
+    pixel_format_ = PixelFormat::YUYV;
 
     std::cout << "[V4L2] 设备已关闭" << std::endl;
 }

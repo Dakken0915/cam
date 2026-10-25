@@ -17,27 +17,32 @@
 #include "frame.hpp"
 #include "bounded_queue.hpp"
 #include "debug.hpp"
+#include "generated_config.hpp"
 
 namespace {
 
 volatile sig_atomic_t signalRunning = 1;
 
 struct Options {
-    std::string device = "/dev/video1";
-    std::string framebuffer = "/dev/fb0";
-    std::string snapshots = "/root/photos";
-    std::string touchDevice = "/dev/input/event1";
-    std::string faceCascade = "assets/haarcascade_frontalface_default.xml";
+    std::string device = CAM_CONFIG_DEVICE;
+    std::string framebuffer = CAM_CONFIG_FRAMEBUFFER;
+    std::string snapshots = CAM_CONFIG_SNAPSHOT_DIR;
+    std::string touchDevice = CAM_CONFIG_TOUCH_DEVICE;
+    std::string faceCascade = CAM_CONFIG_FACE_CASCADE;
     std::string faceReference;
-    int width = 640;
-    int height = 480;
-    int port = 8080;
-    int quality = 80;
-    int grayThresholdPercent = 75;
-    int faceInterval = 8;
-    bool lcdEnabled = true;
+    V4l2Capture::PixelFormat pixelFormat = CAM_CONFIG_FORMAT_MJPEG
+        ? V4l2Capture::PixelFormat::MJPEG : V4l2Capture::PixelFormat::YUYV;
+    int width = CAM_CONFIG_WIDTH;
+    int height = CAM_CONFIG_HEIGHT;
+    int port = CAM_CONFIG_HTTP_PORT;
+    int quality = CAM_CONFIG_JPEG_QUALITY;
+    int grayThresholdPercent = CAM_CONFIG_GRAY_THRESHOLD;
+    int faceInterval = CAM_CONFIG_FACE_INTERVAL;
+    int lcdInterval = CAM_CONFIG_LCD_INTERVAL;
+    bool lcdEnabled = CAM_CONFIG_LCD_ENABLED != 0;
     bool lcdRequired = false;
-    bool touchEnabled = true;
+    bool touchEnabled = CAM_CONFIG_TOUCH_ENABLED != 0;
+    bool faceEnabled = CAM_CONFIG_FACE_ENABLED != 0;
     bool touchRequired = false;
     bool help = false;
 };
@@ -105,6 +110,8 @@ Options parseOptions(int argc, char** argv) {
         {"no-lcd", no_argument, nullptr, 'n'},
         {"width", required_argument, nullptr, 'w'},
         {"height", required_argument, nullptr, 'H'},
+        {"format", required_argument, nullptr, 'F'},
+        {"lcd-interval", required_argument, nullptr, 'l'},
         {"port", required_argument, nullptr, 'p'},
         {"quality", required_argument, nullptr, 'q'},
         {"snapshot-dir", required_argument, nullptr, 's'},
@@ -114,6 +121,7 @@ Options parseOptions(int argc, char** argv) {
         {"face-reference", required_argument, nullptr, 'r'},
         {"gray-threshold", required_argument, nullptr, 'g'},
         {"face-interval", required_argument, nullptr, 'i'},
+        {"no-face", no_argument, nullptr, 'N'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0}
     };
@@ -121,19 +129,29 @@ Options parseOptions(int argc, char** argv) {
     while ((flag = getopt_long(argc, argv, "", options, nullptr)) != -1) {
         switch (flag) {
         case 'd': result.device = optarg; break;
-        case 'f': result.framebuffer = optarg; result.lcdRequired = true; break;
+        case 'f': result.framebuffer = optarg; result.lcdEnabled = true; result.lcdRequired = true; break;
         case 'n': result.lcdEnabled = false; break;
         case 'w': result.width = parseNumber(optarg, 2, 8192); break;
         case 'H': result.height = parseNumber(optarg, 1, 8192); break;
+        case 'F':
+            if (std::string(optarg) == "yuyv")
+                result.pixelFormat = V4l2Capture::PixelFormat::YUYV;
+            else if (std::string(optarg) == "mjpeg")
+                result.pixelFormat = V4l2Capture::PixelFormat::MJPEG;
+            else
+                throw std::invalid_argument("Camera format must be yuyv or mjpeg");
+            break;
+        case 'l': result.lcdInterval = parseNumber(optarg, 1, 30); break;
         case 'p': result.port = parseNumber(optarg, 1, 65535); break;
         case 'q': result.quality = parseNumber(optarg, 1, 100); break;
         case 's': result.snapshots = optarg; break;
-        case 't': result.touchDevice = optarg; result.touchRequired = true; break;
+        case 't': result.touchDevice = optarg; result.touchEnabled = true; result.touchRequired = true; break;
         case 'T': result.touchEnabled = false; break;
         case 'c': result.faceCascade = optarg; break;
         case 'r': result.faceReference = optarg; break;
         case 'g': result.grayThresholdPercent = parseNumber(optarg, 0, 100); break;
         case 'i': result.faceInterval = parseNumber(optarg, 1, 120); break;
+        case 'N': result.faceEnabled = false; break;
         case 'h': result.help = true; break;
         default: throw std::invalid_argument("Unknown or incomplete option; use --help");
         }
@@ -151,20 +169,29 @@ Options parseOptions(int argc, char** argv) {
  */
 void printHelp() {
     std::cout << "Usage: cam_server [options]\n"
-              << "  --device PATH       Camera device (default /dev/video1)\n"
-              << "  --width N           Requested even capture width (default 640)\n"
-              << "  --height N          Requested capture height (default 480)\n"
-              << "  --fb PATH           Require this LCD framebuffer (default /dev/fb0 is optional)\n"
+              << "  --device PATH       Camera device (default " << CAM_CONFIG_DEVICE << ")\n"
+              << "  --width N           Requested even capture width (default " << CAM_CONFIG_WIDTH << ")\n"
+              << "  --height N          Requested capture height (default " << CAM_CONFIG_HEIGHT << ")\n"
+              << "  --format NAME       Camera format: yuyv or mjpeg (default "
+              << (CAM_CONFIG_FORMAT_MJPEG ? "mjpeg" : "yuyv") << ")\n"
+              << "  --lcd-interval N    Render every Nth frame to LCD (default "
+              << CAM_CONFIG_LCD_INTERVAL << ")\n"
+              << "  --fb PATH           Require this LCD framebuffer (default "
+              << CAM_CONFIG_FRAMEBUFFER << " is optional)\n"
               << "  --no-lcd            Disable LCD output\n"
-              << "  --port N            HTTP port (default 8080)\n"
-              << "  --quality N         JPEG quality 1..100 (default 80)\n"
-              << "  --snapshot-dir PATH Snapshot storage (default /root/photos)\n"
-              << "  --touch PATH        Require this evdev touchscreen (default /dev/input/event1)\n"
+              << "  --port N            HTTP port (default " << CAM_CONFIG_HTTP_PORT << ")\n"
+              << "  --quality N         JPEG quality 1..100 (default " << CAM_CONFIG_JPEG_QUALITY << ")\n"
+              << "  --snapshot-dir PATH Snapshot storage (default " << CAM_CONFIG_SNAPSHOT_DIR << ")\n"
+              << "  --touch PATH        Require this evdev touchscreen (default "
+              << CAM_CONFIG_TOUCH_DEVICE << ")\n"
               << "  --no-touch          Disable the LCD touch button\n"
               << "  --face-cascade PATH Haar cascade XML (default assets/haarcascade_frontalface_default.xml)\n"
               << "  --face-reference PATH Optional grayscale comparison image\n"
-              << "  --gray-threshold N  Similarity threshold 0..100 (default 75)\n"
-              << "  --face-interval N   Run face analysis every N frames (default 8)\n"
+              << "  --gray-threshold N  Similarity threshold 0..100 (default "
+              << CAM_CONFIG_GRAY_THRESHOLD << ")\n"
+              << "  --face-interval N   Run face analysis every N frames (default "
+              << CAM_CONFIG_FACE_INTERVAL << ")\n"
+              << "  --no-face           Disable Haar face analysis\n"
               << "  --help              Show this help\n";
 }
 
@@ -204,14 +231,18 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
  * @param  [in,out] jpeg Destination queue for encoded frames.
  * @param  [in,out] display Display object used when LCD output is active.
  * @param  [in] lcdActive Whether the display was initialized.
- * @param  [in] quality JPEG quality in the range 1 to 100.
+ * @param  [in] quality JPEG quality in the range 1 to 100 for YUYV input.
+ * @param  [in] mjpegInput Whether camera payloads are already JPEG-compressed.
+ * @param  [in] lcdInterval Render every Nth processed frame to LCD.
+ * @param  [in] faceInterval Analyze every Nth processed frame in MJPEG mode.
  * @param  [in,out] faceWorker Background Haar detector and optional comparator.
  * @param  [in] faceActive Whether face analysis was initialized successfully.
  * @param  [in,out] state Shared failure and shutdown state.
  * @note   Reports captured and processed FPS; LCD and JPEG work is serial in this thread.
  */
 void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
-                FramebufferDisplay& display, bool lcdActive, int quality,
+                FramebufferDisplay& display, bool lcdActive, int quality, bool mjpegInput,
+                int lcdInterval, int faceInterval,
                 FaceAnalysisWorker& faceWorker, bool faceActive, PipelineState& state) {
     try {
         /* 性能评估相关资源 */
@@ -221,26 +252,50 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
         uint64_t statsFrames = 0;  /* frame count */
         double displayMs = 0.0;
         double encodeMs = 0.0;
+        uint64_t displayFrames = 0;
+        uint64_t inputFrames = 0;
 
         JpegEncoder encoder;
         Frame frame;
         while (raw.take(frame)) {
             if (!signalRunning || state.stop) break;
-            const size_t required = static_cast<size_t>(frame.bytes_per_line) *
-                                    (frame.height - 1) + static_cast<size_t>(frame.width) * 2;
-            if (frame.data.size() < required)
-                throw std::runtime_error("Incomplete YUYV frame");
-            const cv::Mat& bgr = encoder.convertToBgr(frame.data.data(), frame.width,
-                frame.height, static_cast<size_t>(frame.bytes_per_line));
-            if (faceActive) faceWorker.submit(bgr);
+            const uint64_t frameIndex = inputFrames++;
+            const bool renderFrame = lcdActive && (!mjpegInput ||
+                frameIndex % static_cast<uint64_t>(lcdInterval) == 0);
+            const bool analyzeFrame = faceActive && (!mjpegInput ||
+                frameIndex % static_cast<uint64_t>(faceInterval) == 0);
+            cv::Mat decoded;
+            const cv::Mat* bgr = nullptr;
+            if (mjpegInput) {
+                if (renderFrame || analyzeFrame) {
+                    decoded = cv::imdecode(frame.data, cv::IMREAD_COLOR);
+                    if (decoded.empty())
+                        throw std::runtime_error("Cannot decode camera MJPEG frame");
+                    if (decoded.cols != frame.width || decoded.rows != frame.height)
+                        throw std::runtime_error("Decoded MJPEG geometry does not match V4L2 format");
+                    bgr = &decoded;
+                }
+            } else {
+                const size_t required = static_cast<size_t>(frame.bytes_per_line) *
+                                        (frame.height - 1) + static_cast<size_t>(frame.width) * 2;
+                if (frame.data.size() < required)
+                    throw std::runtime_error("Incomplete YUYV frame");
+                bgr = &encoder.convertToBgr(frame.data.data(), frame.width,
+                    frame.height, static_cast<size_t>(frame.bytes_per_line));
+            }
+            if (analyzeFrame && bgr) {
+                if (mjpegInput) faceWorker.submitSelected(*bgr);
+                else faceWorker.submit(*bgr);
+            }
 
             /* LCD 绘制 */
-            if (lcdActive) {
+            if (renderFrame) {
                 /* 统计帧缓冲区渲染输出到 LCD 屏幕的耗时 */
                 const auto displayStart = Clock::now();
-                if(!display.render(bgr))
+                if(!bgr || !display.render(*bgr))
                     throw std::runtime_error("LCD rendering failed");
                 displayMs += std::chrono::duration<double, std::milli>(Clock::now() - displayStart).count();
+                ++displayFrames;
             }
             Frame encoded;
             encoded.sequence = frame.sequence;
@@ -249,7 +304,11 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             encoded.timestamp_us = frame.timestamp_us;
             /* 编码处计时 */
             const auto encodeStart = Clock::now();
-            encoded.data = encoder.encodeBgr(bgr, quality);
+            if (mjpegInput) {
+                encoded.data = std::move(frame.data);
+            } else {
+                encoded.data = encoder.encodeBgr(*bgr, quality);
+            }
             encodeMs += std::chrono::duration<double, std::milli>(Clock::now() - encodeStart).count();
             jpeg.push(std::move(encoded));
 
@@ -263,7 +322,7 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 stats.fps    = statsFrames / elapsed;
                 const uint64_t capturedFrames = state.capturedFrames.load();
                 stats.captureFps = (capturedFrames - lastCapturedFrames) / elapsed;
-                stats.lcdMs  = displayMs / statsFrames;
+                stats.lcdMs  = displayFrames ? displayMs / displayFrames : 0.0;
                 stats.jpegMs = encodeMs / statsFrames;
 
                 if(lcdActive)
@@ -277,6 +336,7 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 statsStart = now;
                 lastCapturedFrames = capturedFrames;
                 statsFrames = 0;
+                displayFrames = 0;
                 displayMs = 0.0;
                 encodeMs = 0.0;
             }
@@ -335,11 +395,11 @@ void touchLoop(Touchscreen& touch, const FramebufferDisplay& display,
  */
 int run(const Options& options) {
     FaceAnalyzer faceAnalyzer;
-    const bool faceCascadeLoaded = faceAnalyzer.loadCascade(options.faceCascade);
-    const bool faceReferenceLoaded = options.faceReference.empty() ||   /* 传了参考图路径 不执行locaRefer */
+    const bool faceCascadeLoaded = !options.faceEnabled || faceAnalyzer.loadCascade(options.faceCascade);
+    const bool faceReferenceLoaded = !options.faceEnabled || options.faceReference.empty() ||
                                      faceAnalyzer.loadReference(options.faceReference);
-    const bool faceActive = faceCascadeLoaded && faceReferenceLoaded;   /* 检测器xml加载成功并且加载了参考人脸 */
-    if (!faceActive)
+    const bool faceActive = options.faceEnabled && faceCascadeLoaded && faceReferenceLoaded;
+    if (options.faceEnabled && !faceActive)
         std::cerr << "[Face] Face analysis disabled; video pipeline will continue\n";
     const double grayThreshold = options.grayThresholdPercent / 100.0;
     FaceAnalysisWorker faceWorker(faceAnalyzer, grayThreshold,
@@ -353,7 +413,8 @@ int run(const Options& options) {
         if (!lcdActive) std::cerr << "[LCD] Continuing with HTTP only; use --fb to require LCD\n";
     }
     V4l2Capture capture;
-    if (!capture.open(options.device, options.width, options.height) || !capture.start())
+    if (!capture.open(options.device, options.width, options.height, options.pixelFormat) ||
+        !capture.start())
         return 1;
     HttpServer server(options.snapshots);
     if (!server.start(options.port)) return 1;
@@ -384,7 +445,9 @@ int run(const Options& options) {
     try {
         captureThread = std::thread(captureLoop, std::ref(capture), std::ref(raw), std::ref(state));
         encodeThread = std::thread(encodeLoop, std::ref(raw), std::ref(jpeg),
-            std::ref(display), lcdActive, options.quality, std::ref(faceWorker),
+            std::ref(display), lcdActive, options.quality,
+            options.pixelFormat == V4l2Capture::PixelFormat::MJPEG,
+            options.lcdInterval, options.faceInterval, std::ref(faceWorker),
             faceActive, std::ref(state));
         if (touchActive)
             touchThread = std::thread(touchLoop, std::ref(touch), std::cref(display),

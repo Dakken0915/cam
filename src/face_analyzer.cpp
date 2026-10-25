@@ -161,6 +161,11 @@ void FaceAnalysisWorker::start() {
  */
 void FaceAnalysisWorker::submit(const cv::Mat& bgr) {
     if (frameCounter_++ % interval_ != 0 || bgr.empty()) return;
+    submitSelected(bgr);
+}
+
+void FaceAnalysisWorker::submitSelected(const cv::Mat& bgr) {
+    if (bgr.empty()) return;
     cv::Mat copy = bgr.clone();
     {
         std::lock_guard<std::mutex> lock(mutex_);

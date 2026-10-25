@@ -52,7 +52,7 @@ cam/
 | 文件 | 职责与关键接口 |
 | --- | --- |
 | [src/main.cpp](src/main.cpp) | 解析启动参数；启动 LCD、摄像头、HTTP 和 `FaceAnalysisWorker`；通过 `captureLoop`、`encodeLoop`、主线程发布 JPEG；协调异常及信号退出。 |
-| [src/v4l2.cpp](src/v4l2.cpp)、[include/v4l2.hpp](include/v4l2.hpp) | `V4l2Capture` 封装格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
+| [src/v4l2.cpp](src/v4l2.cpp)、[include/v4l2.hpp](include/v4l2.hpp) | `V4l2Capture` 封装 YUYV/MJPEG 格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
 | [src/jpeg_encoder.cpp](src/jpeg_encoder.cpp)、[include/jpeg_encoder.hpp](include/jpeg_encoder.hpp) | `convertToBgr` 转换 YUYV，`encodeBgr` 压缩 JPEG；`encode` 保留直接编码 YUYV 的接口。 |
 | [src/framebuffer.cpp](src/framebuffer.cpp)、[include/framebuffer.hpp](include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
 | [src/touchscreen.cpp](src/touchscreen.cpp)、[include/touchscreen.hpp](include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
@@ -77,9 +77,9 @@ cam/
 flowchart LR
     A["V4L2 摄像头"] --> B["采集线程：DQBUF / 复制 / QBUF"]
     B --> C["raw 队列：容量 3"]
-    C --> D["处理线程：YUYV 转 BGR"]
+    C --> D["YUYV 转 BGR 或 MJPEG 解码"]
     D --> E["LCD 缩放与显存写入"]
-    E --> F["同一处理线程：JPEG 编码"]
+    E --> F["YUYV 软件编码 / MJPEG 直接复用"]
     F --> G["jpeg 队列：容量 3"]
     G --> H["主线程：updateFrame"]
     H --> I["HTTP 最新帧缓存"]
@@ -91,7 +91,7 @@ flowchart LR
     N --> O[可选参考图相似度]
 ```
 
-LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接收连接的线程，每个已接纳客户端使用独立处理线程。
+默认 YUYV 模式下，处理线程把 YUYV 转成 BGR，再编码成 JPEG。`--format mjpeg` 时直接把相机 JPEG 交给 HTTP/截图，省去软件 JPEG 编码；只有 LCD 或 Haar 分析需要当前帧时才解码成 BGR。LCD 仍需要解码、缩放和写显存，因此 MJPEG 模式主要省掉 JPEG 编码，不能保证 LCD 达到摄像头采集帧率。`--lcd-interval N` 可降低 LCD 更新频率，网页仍可继续使用每个输入 JPEG；`--face-interval N` 在 MJPEG 模式下也会避免不必要的 JPEG 解码。HTTP 另有一个接收连接的线程，每个已接纳客户端使用独立处理线程。
 
 两个队列满时丢最旧帧，不让内存随积压无限增长。HTTP 客户端读取最新 JPEG，慢客户端可以跳过中间帧。容量限制不能保证固定延迟；LCD 和 JPEG 在同一线程串行执行，编码耗时仍会影响显示帧率。
 
@@ -105,7 +105,7 @@ LCD 关闭时，处理线程直接将 BGR 编码为 JPEG。HTTP 另有一个接�
 
 打开设备后，依次执行 `QUERYCAP`、`S_FMT`、`REQBUFS`、`QUERYBUF`、`mmap`、`QBUF` 和 `STREAMON`。默认申请 4 个驱动缓冲区，实际使用驱动返回的数量。设备提供 `V4L2_CAP_DEVICE_CAPS` 时按 `device_caps` 判断当前节点能力。
 
-只接受单平面 `V4L2_BUF_TYPE_VIDEO_CAPTURE`、YUYV 和逐行扫描。驱动可调整请求的宽高；后续处理使用协商后的尺寸及行跨度。YUYV 的两个像素按 `Y0 U Y1 V` 排列，因此宽度必须为偶数。
+只接受单平面 `V4L2_BUF_TYPE_VIDEO_CAPTURE`、YUYV 或 MJPEG 和逐行扫描。驱动可调整请求的宽高；后续处理使用协商后的尺寸及行跨度。YUYV 的两个像素按 `Y0 U Y1 V` 排列，因此宽度必须为偶数；MJPEG 按 `bytesused` 传递压缩帧，不使用固定行跨度校验。
 
 MMAP 将驱动缓冲区映射到用户空间；应用仍会复制一份帧数据，再立即归还缓冲区，供驱动继续采集。这样可让工作线程持有独立数据，属于映射采集加一次用户态复制，并非全流程零拷贝。
 
@@ -137,7 +137,7 @@ offset = (yoffset + y) * line_length + (xoffset + x) * (bits_per_pixel / 8)
 
 | 接口或数据 | 使用约定 |
 | --- | --- |
-| `Frame::data` | raw 队列保存 YUYV；jpeg 队列保存 JPEG。编码帧的 `bytes_per_line` 不用于 JPEG 解码。 |
+| `Frame::data` | raw 队列保存 YUYV 或 MJPEG；jpeg 队列保存 JPEG。编码帧的 `bytes_per_line` 不用于 JPEG 解码。 |
 | `Frame::timestamp_us` | 复制完成后的单调时钟时间，不是驱动曝光时间或日历时间；当前不对外发送。 |
 | `V4l2Capture` | 持有设备句柄与映射，禁止复制；`stop` 同时关闭设备，重新采集需再次 `open`。类接口默认设备为 `/dev/video0`，应用参数默认值为 `/dev/video1`。 |
 | `JpegEncoder::convertToBgr` | 返回内部复用缓存的引用；下一次转换可能覆盖数据，应在同一处理线程内消费。调用者负责保证输入缓冲区长度足够。 |
@@ -168,7 +168,7 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
-目前不支持 MJPEG-only、UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。JPEG 使用 CPU 编码；单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
+目前不支持 UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。YUYV 模式的 JPEG 使用 CPU 编码；MJPEG 模式可复用相机 JPEG，但 LCD/人脸处理仍使用 CPU 解码。单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
 
 ### Haar 人脸检测与灰度图比对
 
@@ -337,22 +337,53 @@ LD_LIBRARY_PATH=/opt/cam/lib ./cam_server_arm --device /dev/video1 --fb /dev/fb0
 
 ### 启动参数与常用模式
 
+### 配置菜单与头文件生成
+
+&emsp;&emsp;工程使用 Kconfig 风格的文本配置，但不依赖完整 Linux 内核构建系统。`config/Kconfig` 描述配置项、类型、默认值和取值范围；`config/cam_defconfig` 保存一份可复现的默认配置。执行 `make menuconfig` 或 `make -f Makefile.arm menuconfig` 时，脚本按 `MCONF` 环境变量、`mconf`、`kconfig-mconf` 的顺序寻找真正的 Kconfig 界面；找到后直接显示 Linux 内核经典的蓝色 Kconfig UI，并通过 `KCONFIG_CONFIG` 写入 `.config`。只有系统没有这些程序时才使用 `whiptail` 后备界面；后备界面采用主菜单、分类子菜单和配置项选择三级结构，并设置蓝底、白字、青色高亮的 ncurses 配色。格式、分辨率、开关、刷新间隔、JPEG 质量和分析间隔都从固定选项中选择，不再输入任意数值；设备路径、截图目录和模型路径仍使用文本输入。菜单会读取已有 `CONFIG_*` 值，因此再次进入菜单会继承上次选择。`make defconfig` 则直接恢复 `config/cam_defconfig`。
+
+&emsp;&emsp;可选摄像头分辨率为 `320x240`、`640x480`、`800x600`、`1280x720` 和 `1280x1024`。宽度和高度作为一个选项同时写入，避免分别输入造成不匹配；生成脚本也会拒绝不在列表中的分辨率。
+
+&emsp;&emsp;Makefile 不会把 `.config` 当作 Make 变量文件执行，也不会通过 `include .config` 直接生成 C++ 宏。它建立了以下依赖链：
+
+```text
+.config + scripts/gen_config.sh
+              │
+              └──> build/generated_config.hpp
+                              │
+                              └──> build/cam_server
+```
+
+&emsp;&emsp;当头文件不存在，或 `.config`、`scripts/gen_config.sh` 的修改时间晚于头文件时，规则 `$(CONFIG_HEADER): $(CONFIG_FILE) $(CONFIG_SCRIPT)` 执行 `sh scripts/gen_config.sh .config build/generated_config.hpp`。脚本逐行读取 `CONFIG_*`，去掉字符串值外层引号，把 `y`/`n` 转为 `1`/`0`，检查摄像头尺寸，然后写出带 include guard 的 C++ 头文件。例如 `CONFIG_CAM_CAMERA_WIDTH=640` 变为 `#define CAM_CONFIG_WIDTH 640`，`CONFIG_CAM_FORMAT_MJPEG=y` 变为 `#define CAM_CONFIG_FORMAT_MJPEG 1`。字符串在写入前会转义反斜杠和双引号，避免路径破坏 C++ 字面量。
+
+&emsp;&emsp;`src/main.cpp` 通过 `#include "generated_config.hpp"` 使用这些宏；两个 Makefile 都把对应输出目录加入 `-I` 搜索路径，并让主程序目标依赖生成头文件。因此修改 `.config` 后直接执行 `make` 会先重生成头文件，再重新编译程序；只执行 `make menuconfig` 只修改配置，不会自动编译。可以用下面的命令检查每一步：
+
+```sh
+make -n cam_server
+sh scripts/gen_config.sh .config /tmp/generated_config.hpp
+sed -n '1,80p' /tmp/generated_config.hpp
+make cam_server
+```
+
+&emsp;&emsp;这种方式的优点是配置文件可审查、头文件是明确的构建产物、主机和 ARM 构建共用同一套转换逻辑；替代方案是让 C++ 直接解析 `.config`，但会把配置解析、错误处理和运行时依赖带进目标程序，也不能在编译期检查宏值。需要注意的是，命令行参数仍然可以覆盖头文件中的默认值，`.config` 只提供启动默认配置。
+
 | 参数 | 默认值 | 约束与行为 |
 | --- | --- | --- |
 | `--device PATH` | `/dev/video1` | 摄像头设备路径，设备不存在或不支持时退出 |
 | `--width N` | 640 | 请求宽度，2..8192 且必须为偶数；以驱动实际协商值为准 |
 | `--height N` | 480 | 请求高度，1..8192；以驱动实际协商值为准 |
+| `--format NAME` | `mjpeg` | `yuyv` 或 `mjpeg`；摄像头须支持所选尺寸和格式 |
+| `--lcd-interval N` | `3` | MJPEG 模式每 N 个输入帧渲染一次 LCD；menuconfig 提供 1、2、3、4、5 五个固定选项，网页输出不受影响 |
 | `--fb PATH` | 未显式指定 | 默认尝试 `/dev/fb0`；显式传入该参数则要求 LCD 必须初始化成功 |
 | `--no-lcd` | 未启用 | 禁用 LCD，与 `--fb` 互斥 |
 | `--port N` | 8080 | HTTP 监听端口，1..65535；端口占用或无权限时退出 |
 | `--quality N` | 80 | JPEG 质量，1..100；不是帧率参数 |
 | `--snapshot-dir PATH` | `/root/photos` | 触摸和 HTTP 图片保存目录；父目录须已存在且可写 |
-| `--touch PATH` | `/dev/input/event1` | 指定触摸 evdev 节点；设备打开失败会退出 |
+| `--touch PATH` | `/dev/input/event1` | 指定触摸 evdev 节点；menuconfig 的 `LCD and touch` 菜单默认配置该路径，设备打开失败会退出 |
 | `--no-touch` | 未启用 | 禁用 LCD 拍照按钮和触摸线程 |
 | `--face-cascade PATH` | `assets/haarcascade_frontalface_default.xml` | Haar XML 模型；相对路径相对于启动目录，加载失败时禁用人脸分析 |
 | `--face-reference PATH` | 空 | 可选参考图片；对每个检测框进行简易灰度相似度比对 |
 | `--gray-threshold N` | `75` | 相似度阈值百分比，范围 0..100；仅在指定参考图时生效 |
-| `--face-interval N` | `8` | 每 N 个处理帧执行一次人脸检测和比对，范围 1..120；增大可降低平均 CPU 使用 |
+| `--face-interval N` | `30` | 每 N 个处理帧执行一次人脸检测和比对；menuconfig 提供 1、5、10、30、60 五个固定选项，增大可降低平均 CPU 使用 |
 | `--help` | 未启用 | 显示帮助并退出，不打开设备 |
 
 `make package_arm` 生成的目录结构如下：
@@ -368,6 +399,13 @@ LCD 与网络同时输出：
 
 ```sh
 ./cam_server_arm --device /dev/video1 --fb /dev/fb0 --touch /dev/input/event1 --width 640 --height 480 --port 8080 --quality 80
+```
+
+若摄像头支持 MJPEG，可用以下命令减少板端软件 JPEG 编码负载。MJPEG 沿用摄像头输出的 JPEG 质量，因此 `--quality` 不生效；请在板端对比 LCD/JPEG 延迟、CPU 和实际 `FPS`。
+
+```sh
+./cam_server_arm --device /dev/video1 --format mjpeg --fb /dev/fb0 \
+  --lcd-interval 2 --width 640 --height 480 --port 8080
 ```
 
 仅网络输出：
@@ -400,9 +438,9 @@ LCD 与网络同时输出：
 [Face] detected=1 box=210,80,180x180 similarity=0.83 matched=yes
 ```
 
-板端格式枚举显示：640x480 的 YUYV 和 MJPEG 都声明支持 30 FPS；800x600 的 MJPEG 也声明支持 30 FPS，1280x720 的 MJPEG 支持 30 FPS，1280x1024 的 MJPEG 支持 30 FPS。`--set-parm=30` 被接受且 `--get-parm` 报告 30 FPS，但完整稳定采集测试中 YUYV 和 MJPEG 都约为 14 FPS。由于使用 `v4l2-ctl` 单独采集仍复现，应用的 LCD/JPEG 处理不是这个 14 FPS 上限的唯一来源；优先检查 USB 连接速度、相机/驱动实际帧率、板端 CPU 和供电。V4L2 帧间隔是驱动配置值，实际吞吐仍须以完整采集测量为准。
+板端格式枚举显示：640x480 的 YUYV 和 MJPEG 都声明支持 30 FPS；800x600 的 MJPEG 也声明支持 30 FPS，1280x720 的 MJPEG 支持 30 FPS，1280x1024 的 MJPEG 支持 30 FPS。`--set-parm=30` 被接受且 `--get-parm` 报告 30 FPS。早期独立测试曾测得约 14 FPS，但后续应用实测能稳定接近 30 FPS，因此不能把单次 14 FPS 结果视为摄像头固定上限；帧率需要在相同运行条件下完整测量。
 
-板端诊断显示摄像头通过 USB 480M 高速链路连接，排除了明显的 USB Full-Speed（12M）降速；运行程序时 CPU 约为 75% user、8% system、16% softirq，几乎没有 idle，`cam_server_arm` 约占 77% CPU。此时日志中的 `CAP` 约 9.6~10.4 FPS、处理 `FPS` 约 5.5~6.7 FPS，说明当前程序已受 i.MX6ULL CPU、JPEG 编码、LCD 写入和人脸线程的综合负载影响。`top` 本身还占用约 15% CPU，因此交互查看期间的帧率会进一步下降；性能测试应在退出 `top` 后单独进行。
+板端一组旧诊断显示摄像头通过 USB 480M 高速链路连接，CPU 曾达到 75% user、8% system、16% softirq，处理帧率约 5.5~6.7 FPS。MJPEG 直通后，`--lcd-interval 2` 实测处理约 13~22 FPS，LCD 单次刷新约 50~75ms；改为 `--lcd-interval 3` 后，稳定阶段 `CAP` 约 29~31 FPS、处理 `FPS` 约 26~29 FPS，LCD 单次刷新约 59~82ms，触摸开启时结果相近。说明软件 JPEG 编码已基本移除，剩余成本主要在 MJPEG 解码、LCD 缩放和逐像素显存写入。`JPEG` 约 0.002ms 表示应用复用相机压缩数据的时间，不包括摄像头内部编码时间。`top` 本身也会占用 CPU；测试时退出 `top` 后再观察稳定日志。
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
 
@@ -516,10 +554,10 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
   --width 320 --height 240 --face-interval 120 --quality 50
 ```
 
-第一组仍然较低，说明软件 JPEG 或 YUYV 转换是主要负载；第二组明显升高，说明 640x480 的像素处理量是瓶颈；重新启用 LCD 后再下降，则 framebuffer 写入是额外瓶颈。确认基线后，优先减少软件 JPEG 编码和逐像素 LCD 写入，再考虑 MJPEG 直通。
+第一组仍然较低，说明软件 JPEG 或 YUYV 转换是主要负载；第二组明显升高，说明 640x480 的像素处理量是瓶颈；重新启用 LCD 后再下降，则 framebuffer 写入是额外瓶颈。当前 MJPEG 实测已经确认软件 JPEG 是主要开销之一；`--lcd-interval 3` 将处理帧率提升到接近 30 FPS，但 LCD 每秒只刷新约 9~10 次。后续应根据可接受的屏幕流畅度选择刷新间隔，再考虑降低显示缩放成本或使用 BSP 硬件显示通路。
 
 本次板端 320x240、关闭 LCD、JPEG 质量 50 的实测结果为 `CAP/FPS` 约 10 FPS，JPEG 编码约 18.5~19.0ms。与 640x480 时约 10 FPS 的采集结果相比，降低分辨率主要减少了处理耗时，没有提高当前摄像头实际输出帧率；因此后续需要区分摄像头/驱动帧率限制与应用处理优化。
 
 ### 摄像头格式选择
 
-YUYV 保留原始像素但占用较高的 USB 和摄像头处理带宽；MJPEG 由摄像头先压缩，通常可以降低传输带宽，并可直接复用到 HTTP 和照片保存路径。格式表中的 30 FPS 只能作为能力声明，必须用完整采集窗口测量实际吞吐；板端两种格式的单独采集都稳定在约 14 FPS，说明还需排查相机/USB/驱动端限制。确认链路后，再评估 MJPEG 直通 HTTP/拍照和独立解码到 LCD 的路径。MJPEG 仍需要解码才能显示到 framebuffer，不能保证 LCD 同样达到摄像头输出帧率。
+YUYV 保留原始像素但占用较高的 USB 和摄像头处理带宽；MJPEG 由摄像头先压缩，通常可以降低传输带宽，并可直接复用到 HTTP 和照片保存路径。格式表中的 30 FPS 只能作为能力声明，实际吞吐必须用完整采集窗口测量。板端 `--lcd-interval 2` 曾处理约 13~22 FPS，改为 `--lcd-interval 3` 后稳定阶段达到约 26~29 FPS；LCD 刷新约为处理频率的三分之一，单次刷新仍需 59~82ms。MJPEG 仍需要解码才能显示到 framebuffer，不能保证 LCD 同样达到摄像头输出帧率。

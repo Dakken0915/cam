@@ -107,6 +107,13 @@ public:
     void submit(const cv::Mat& bgr);
 
     /**
+     * @brief  Queue a frame already selected by the caller for analysis.
+     * @param  [in] bgr Selected camera frame; the worker copies it before returning.
+     * @note   Replaces any pending frame when the worker is busy.
+     */
+    void submitSelected(const cv::Mat& bgr);
+
+    /**
      * @brief  Stop the worker, discard pending work, and join its thread.
      */
     void stop();

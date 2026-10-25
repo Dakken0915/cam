@@ -1,0 +1,135 @@
+mainmenu "Camera pipeline configuration"
+
+menu "Camera input"
+
+config CAM_CAMERA_DEVICE
+	string "Video device"
+	default "/dev/video1"
+
+choice
+	prompt "Camera pixel format"
+	default CAM_FORMAT_MJPEG
+
+config CAM_FORMAT_YUYV
+	bool "YUYV"
+
+config CAM_FORMAT_MJPEG
+	bool "MJPEG"
+
+endchoice
+
+choice
+	prompt "Camera resolution"
+	default CAM_RES_640_480
+
+config CAM_RES_320_240
+	bool "320 x 240"
+
+config CAM_RES_640_480
+	bool "640 x 480"
+
+config CAM_RES_800_600
+	bool "800 x 600"
+
+config CAM_RES_1280_720
+	bool "1280 x 720"
+
+config CAM_RES_1280_1024
+	bool "1280 x 1024"
+
+endchoice
+
+endmenu
+
+menu "LCD and touch"
+
+config CAM_LCD_ENABLED
+	bool "Enable LCD by default"
+	default y
+
+config CAM_FRAMEBUFFER_DEVICE
+	string "Framebuffer device"
+	default "/dev/fb0"
+
+choice
+	prompt "Render LCD every N input frames"
+	default CAM_LCD_INTERVAL_3
+
+config CAM_LCD_INTERVAL_1
+	bool "Every frame"
+
+config CAM_LCD_INTERVAL_2
+	bool "Every 2 frames"
+
+config CAM_LCD_INTERVAL_3
+	bool "Every 3 frames"
+
+config CAM_LCD_INTERVAL_4
+	bool "Every 4 frames"
+
+config CAM_LCD_INTERVAL_5
+	bool "Every 5 frames"
+
+endchoice
+
+config CAM_TOUCH_ENABLED
+	bool "Enable touch capture button by default"
+	default y
+
+config CAM_TOUCH_DEVICE
+	string "Touch event device"
+	default "/dev/input/event1"
+
+config CAM_FACE_ENABLED
+	bool "Enable face analysis by default"
+	default y
+
+endmenu
+
+menu "Processing and output"
+
+config CAM_JPEG_QUALITY
+	int "Software JPEG quality"
+	range 1 100
+	default 80
+
+choice
+	prompt "Analyze one frame every N frames"
+	default CAM_FACE_INTERVAL_30
+
+config CAM_FACE_INTERVAL_1
+	bool "Every frame"
+
+config CAM_FACE_INTERVAL_5
+	bool "Every 5 frames"
+
+config CAM_FACE_INTERVAL_10
+	bool "Every 10 frames"
+
+config CAM_FACE_INTERVAL_30
+	bool "Every 30 frames"
+
+config CAM_FACE_INTERVAL_60
+	bool "Every 60 frames"
+
+endchoice
+
+config CAM_GRAY_THRESHOLD
+	int "Grayscale match threshold percent"
+	range 0 100
+	default 75
+
+config CAM_HTTP_PORT
+	int "HTTP port"
+	range 1 65535
+	default 8080
+
+config CAM_SNAPSHOT_DIR
+	string "Snapshot directory"
+	default "/root/photos"
+
+config CAM_FACE_CASCADE
+	string "Haar cascade path"
+	default "assets/haarcascade_frontalface_default.xml"
+
+endmenu

@@ -1,4 +1,5 @@
 # Linux 本机构建与 HTTP 集成测试
+.DEFAULT_GOAL := cam_server
 CXX      = g++
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -g
 LDFLAGS  = -lpthread
@@ -9,15 +10,32 @@ CXXFLAGS += -I ./include
 
 SRC_DIR = src
 OBJ_DIR   = build
+CONFIG_FILE ?= .config
+CONFIG_SCRIPT = scripts/gen_config.sh
+CONFIG_HEADER = $(OBJ_DIR)/generated_config.hpp
+CXXFLAGS += -I$(OBJ_DIR)
+
+$(CONFIG_FILE):
+	@if [ ! -f "$@" ]; then cp config/cam_defconfig "$@"; fi
 
 COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp $(SRC_DIR)/face_analyzer.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server: $(OBJ_DIR)/cam_server
 
-$(OBJ_DIR)/cam_server: $(SRC_DIR)/main.cpp $(COMMON_SRCS) $(HEADERS)
+$(OBJ_DIR)/cam_server: $(CONFIG_HEADER) $(SRC_DIR)/main.cpp $(COMMON_SRCS) $(HEADERS)
 	@mkdir -p $(OBJ_DIR)
-	$(CXX) $(CXXFLAGS) $(OPENCV_CFLAGS) $< $(COMMON_SRCS) -o $@ $(LDFLAGS) $(OPENCV_LIBS)
+	$(CXX) $(CXXFLAGS) $(OPENCV_CFLAGS) $(SRC_DIR)/main.cpp $(COMMON_SRCS) -o $@ $(LDFLAGS) $(OPENCV_LIBS)
+
+$(CONFIG_HEADER): $(CONFIG_FILE) $(CONFIG_SCRIPT)
+	@mkdir -p $(OBJ_DIR)
+	sh $(CONFIG_SCRIPT) $(CONFIG_FILE) $@
+
+menuconfig: $(CONFIG_FILE)
+	sh scripts/menuconfig.sh $(CONFIG_FILE)
+
+defconfig:
+	cp config/cam_defconfig $(CONFIG_FILE)
 
 test_http_server: $(OBJ_DIR)/test_http_server
 	$(OBJ_DIR)/test_http_server
@@ -55,4 +73,4 @@ test: test_http_server test_video test_v4l2 test_face_analyzer
 clean:
 	rm -rf $(OBJ_DIR)
 
-.PHONY: cam_server run test test_http_server test_video test_v4l2 test_face_analyzer clean
+.PHONY: cam_server menuconfig defconfig run test test_http_server test_video test_v4l2 test_face_analyzer clean

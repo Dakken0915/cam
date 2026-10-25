@@ -18,6 +18,7 @@ int pollResult = 1;
 unsigned long failRequest = 0;
 int failMapping = -1;
 bool formatInvalid = false;
+bool acceptMjpeg = false;
 bool deviceCapsInvalid = false;
 v4l2_buffer dequeued{};
 
@@ -37,7 +38,7 @@ void reset() {
     pollResult = 1;
     failRequest = 0;
     failMapping = -1;
-    formatInvalid = deviceCapsInvalid = false;
+    formatInvalid = deviceCapsInvalid = acceptMjpeg = false;
     dequeued = v4l2_buffer{};
     dequeued.bytesused = 12;
     dequeued.sequence = 42;
@@ -110,6 +111,7 @@ extern "C" int __wrap_ioctl(int, unsigned long request, ...) {
         format->fmt.pix.width = 2;
         format->fmt.pix.height = 2;
         format->fmt.pix.bytesperline = formatInvalid ? 2 : 8;
+        if (acceptMjpeg) format->fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
     } else if (request == VIDIOC_REQBUFS) {
         static_cast<v4l2_requestbuffers*>(arg)->count = 2;
     } else if (request == VIDIOC_QUERYBUF) {
@@ -167,6 +169,20 @@ int main() {
                     "signal interrupted poll not propagated");
         }
         require(streamOffCount == 1, "stream not stopped once");
+        reset();
+        {
+            acceptMjpeg = true;
+            V4l2Capture capture;
+            require(capture.open("mock", 640, 480, V4l2Capture::PixelFormat::MJPEG),
+                    "MJPEG camera negotiation failed");
+            require(capture.start(), "MJPEG capture start failed");
+            dequeued.bytesused = 5;
+            std::vector<uint8_t> frame;
+            uint32_t sequence = 0;
+            require(capture.getFrame(frame, sequence) == V4l2Capture::FrameResult::Frame &&
+                    frame.size() == 5, "short compressed MJPEG payload was rejected");
+        }
+        require(streamOffCount == 1, "MJPEG stream not stopped once");
         for (unsigned long request : {VIDIOC_REQBUFS, VIDIOC_QUERYBUF, VIDIOC_QBUF, VIDIOC_STREAMON}) {
             reset();
             V4l2Capture capture;
