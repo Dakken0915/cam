@@ -96,8 +96,6 @@ set_value() {
         format) format=$value ;;
         resolution) resolution=$value ;;
         camera_device) camera_device=$value ;;
-        frame_rate) frame_rate=$value ;;
-        exposure_auto_priority) exposure_auto_priority=$value ;;
         lcd_enabled) lcd_enabled=$value ;;
         lcd_interval) lcd_interval=$value ;;
         framebuffer_device) framebuffer_device=$value ;;
@@ -165,8 +163,6 @@ read_choice() {
     printf '%s' "$fallback"
 }
 
-frame_rate=$(read_choice CONFIG_CAM_FPS_ 30 10 20 30)
-exposure_auto_priority=$(get_value CONFIG_CAM_EXPOSURE_AUTO_PRIORITY n)
 lcd_interval=$(read_choice CONFIG_CAM_LCD_INTERVAL_ 3 1 2 3 4 5)
 case "$jpeg_quality" in 50|60|70|80|90|100) ;; *) jpeg_quality=80 ;; esac
 face_interval=$(read_choice CONFIG_CAM_FACE_INTERVAL_ 30 1 5 10 30 60)
@@ -175,17 +171,10 @@ case "$http_port" in 80|8000|8080|8888) ;; *) http_port=8080 ;; esac
 
 camera_menu() {
     while choice=$(menu_choice "Camera input" "format" \
-        format "Pixel format: $format" frame_rate "Frame rate: ${frame_rate} FPS" \
-        exposure_auto_priority "Auto exposure may lower FPS: $exposure_auto_priority" \
-        resolution "Resolution: $resolution" \
+        format "Pixel format: $format" resolution "Resolution: $resolution" \
         device "Video device: $camera_device" back "Back"); do
         case "$choice" in
             format) update_choice format "Camera pixel format" "$format" y "MJPEG (camera compressed)" n "YUYV (raw)" ;;
-            frame_rate) update_choice frame_rate "Requested camera frame rate" "$frame_rate" \
-                10 "10 FPS" 20 "20 FPS" 30 "30 FPS" ;;
-            exposure_auto_priority) update_choice exposure_auto_priority \
-                "Allow auto exposure to reduce frame rate in low light" "$exposure_auto_priority" \
-                n "Disabled: keep requested frame rate" y "Enabled: prioritize image brightness" ;;
             resolution) update_choice resolution "Camera resolution" "$resolution" \
                 320x240 "320 x 240" 640x480 "640 x 480" 800x600 "800 x 600" \
                 1280x720 "1280 x 720" 1280x1024 "1280 x 1024" ;;
@@ -261,8 +250,6 @@ write_config() {
         printf 'CONFIG_CAM_RESOLUTION=%s\n' "$resolution"
         printf 'CONFIG_CAM_CAMERA_WIDTH=%s\nCONFIG_CAM_CAMERA_HEIGHT=%s\n' "$width" "$height"
         printf 'CONFIG_CAM_CAMERA_DEVICE="%s"\n' "$camera_device"
-        write_choice CAM_FPS "$frame_rate" 10 20 30
-        [ "$exposure_auto_priority" = y ] && printf 'CONFIG_CAM_EXPOSURE_AUTO_PRIORITY=y\n' || printf '# CONFIG_CAM_EXPOSURE_AUTO_PRIORITY is not set\n'
         [ "$lcd_enabled" = y ] && printf 'CONFIG_CAM_LCD_ENABLED=y\n' || printf '# CONFIG_CAM_LCD_ENABLED is not set\n'
         printf 'CONFIG_CAM_FRAMEBUFFER_DEVICE="%s"\n' "$framebuffer_device"
         write_choice CAM_LCD_INTERVAL "$lcd_interval" 1 2 3 4 5

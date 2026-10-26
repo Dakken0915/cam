@@ -7,25 +7,6 @@ config CAM_CAMERA_DEVICE
 	default "/dev/video1"
 
 choice
-	prompt "Requested camera frame rate"
-	default CAM_FPS_30
-
-config CAM_FPS_10
-	bool "10 FPS"
-
-config CAM_FPS_20
-	bool "20 FPS"
-
-config CAM_FPS_30
-	bool "30 FPS"
-
-endchoice
-
-config CAM_EXPOSURE_AUTO_PRIORITY
-	bool "Allow auto exposure to reduce frame rate in low light"
-	default n
-
-choice
 	prompt "Camera pixel format"
 	default CAM_FORMAT_MJPEG
 

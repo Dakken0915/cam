@@ -34,7 +34,7 @@ CXXFLAGS += -I$(OBJ_DIR)
 $(CONFIG_FILE):
 	@if [ ! -f "$@" ]; then cp config/cam_defconfig "$@"; fi
 
-COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp $(SRC_DIR)/face_analyzer.cpp $(SRC_DIR)/lcd_process.cpp
+COMMON_SRCS = $(SRC_DIR)/v4l2.cpp $(SRC_DIR)/jpeg_encoder.cpp $(SRC_DIR)/http_server.cpp $(SRC_DIR)/framebuffer.cpp $(SRC_DIR)/touchscreen.cpp $(SRC_DIR)/face_analyzer.cpp
 HEADERS = $(wildcard include/*.hpp)
 
 cam_server_arm: $(OBJ_DIR)/cam_server_arm

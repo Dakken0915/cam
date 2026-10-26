@@ -20,8 +20,6 @@ int failMapping = -1;
 bool formatInvalid = false;
 bool acceptMjpeg = false;
 bool deviceCapsInvalid = false;
-unsigned int requestedFrameRate = 0;
-int exposureAutoPriority = -1;
 v4l2_buffer dequeued{};
 
 /**
@@ -41,8 +39,6 @@ void reset() {
     failRequest = 0;
     failMapping = -1;
     formatInvalid = deviceCapsInvalid = acceptMjpeg = false;
-    requestedFrameRate = 0;
-    exposureAutoPriority = -1;
     dequeued = v4l2_buffer{};
     dequeued.bytesused = 12;
     dequeued.sequence = 42;
@@ -116,20 +112,6 @@ extern "C" int __wrap_ioctl(int, unsigned long request, ...) {
         format->fmt.pix.height = 2;
         format->fmt.pix.bytesperline = formatInvalid ? 2 : 8;
         if (acceptMjpeg) format->fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-    } else if (request == VIDIOC_G_PARM) {
-        auto* stream = static_cast<v4l2_streamparm*>(arg);
-        stream->parm.capture.timeperframe.numerator = 1;
-        stream->parm.capture.timeperframe.denominator = 25;
-    } else if (request == VIDIOC_S_PARM) {
-        auto* stream = static_cast<v4l2_streamparm*>(arg);
-        requestedFrameRate = stream->parm.capture.timeperframe.denominator;
-        require(stream->parm.capture.timeperframe.numerator == 1 &&
-                    (requestedFrameRate == 10 || requestedFrameRate == 20 || requestedFrameRate == 30),
-                "invalid requested frame rate");
-    } else if (request == VIDIOC_S_CTRL) {
-        auto* control = static_cast<v4l2_control*>(arg);
-        if (control->id == V4L2_CID_EXPOSURE_AUTO_PRIORITY)
-            exposureAutoPriority = control->value;
     } else if (request == VIDIOC_REQBUFS) {
         static_cast<v4l2_requestbuffers*>(arg)->count = 2;
     } else if (request == VIDIOC_QUERYBUF) {
@@ -155,8 +137,6 @@ int main() {
         {
             V4l2Capture capture;
             require(capture.open("mock", 640, 480), "valid camera open failed");
-            require(requestedFrameRate == 30, "default frame rate request missing");
-            require(exposureAutoPriority == 0, "default exposure priority is not disabled");
             require(capture.width() == 2 && capture.height() == 2 && capture.bytesPerLine() == 8,
                     "negotiated format ignored");
             require(capture.start() && capture.start(), "capture start failed");
@@ -193,9 +173,8 @@ int main() {
         {
             acceptMjpeg = true;
             V4l2Capture capture;
-            require(capture.open("mock", 640, 480, V4l2Capture::PixelFormat::MJPEG, 20),
+            require(capture.open("mock", 640, 480, V4l2Capture::PixelFormat::MJPEG),
                     "MJPEG camera negotiation failed");
-            require(requestedFrameRate == 20, "configured frame rate request missing");
             require(capture.start(), "MJPEG capture start failed");
             dequeued.bytesused = 5;
             std::vector<uint8_t> frame;
@@ -204,19 +183,6 @@ int main() {
                     frame.size() == 5, "short compressed MJPEG payload was rejected");
         }
         require(streamOffCount == 1, "MJPEG stream not stopped once");
-        reset();
-        {
-            V4l2Capture capture;
-            require(capture.open("mock", 640, 480, V4l2Capture::PixelFormat::MJPEG, 20, true),
-                    "exposure priority camera negotiation failed");
-            require(exposureAutoPriority == 1, "enabled exposure priority was not requested");
-        }
-        reset();
-        {
-            V4l2Capture capture;
-            failRequest = VIDIOC_S_CTRL;
-            require(capture.open("mock"), "unsupported exposure control stopped capture");
-        }
         for (unsigned long request : {VIDIOC_REQBUFS, VIDIOC_QUERYBUF, VIDIOC_QBUF, VIDIOC_STREAMON}) {
             reset();
             V4l2Capture capture;

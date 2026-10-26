@@ -64,7 +64,6 @@ quote_cpp() {
 }
 
 device=$(quote_cpp "$(get_value CONFIG_CAM_CAMERA_DEVICE /dev/video1)")
-frame_rate=$(get_choice_value CONFIG_CAM_FPS_ 30 10 10 20 20 30 30)
 resolution=$(get_resolution)
 width=${resolution%x*}
 height=${resolution#*x}
@@ -74,7 +73,6 @@ lcd_interval=$(get_choice_value CONFIG_CAM_LCD_INTERVAL_ 3 1 1 2 2 3 3 4 4 5 5)
 snapshot_dir=$(quote_cpp "$(get_value CONFIG_CAM_SNAPSHOT_DIR /root/photos)")
 cascade=$(quote_cpp "$(get_value CONFIG_CAM_FACE_CASCADE assets/haarcascade_frontalface_default.xml)")
 format_mjpeg=$(get_bool CONFIG_CAM_FORMAT_MJPEG y)
-exposure_auto_priority=$(get_bool CONFIG_CAM_EXPOSURE_AUTO_PRIORITY n)
 face_interval=$(get_choice_value CONFIG_CAM_FACE_INTERVAL_ 30 1 1 5 5 10 10 30 30 60 60)
 case "$resolution" in
     320x240|640x480|800x600|1280x720|1280x1024) ;;
@@ -91,8 +89,6 @@ mkdir -p "$(dirname "$output_file")"
 {
     printf '%s\n' '#ifndef CAM_GENERATED_CONFIG_HPP' '#define CAM_GENERATED_CONFIG_HPP'
     printf '#define CAM_CONFIG_DEVICE "%s"\n' "$(quote_cpp "$(get_value CONFIG_CAM_CAMERA_DEVICE /dev/video1)")"
-    printf '#define CAM_CONFIG_FRAME_RATE %s\n' "$frame_rate"
-    printf '#define CAM_CONFIG_EXPOSURE_AUTO_PRIORITY %s\n' "$exposure_auto_priority"
     printf '#define CAM_CONFIG_FRAMEBUFFER "%s"\n' "$lcd_device"
     printf '#define CAM_CONFIG_TOUCH_DEVICE "%s"\n' "$touch_device"
     printf '#define CAM_CONFIG_SNAPSHOT_DIR "%s"\n' "$snapshot_dir"

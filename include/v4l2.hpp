@@ -44,15 +44,12 @@ public:
      * @param  [in] width Requested positive, even image width.
      * @param  [in] height Requested positive image height.
      * @param  [in] format Requested camera pixel format.
-     * @param  [in] frameRate Requested capture rate in frames per second.
-     * @param  [in] exposureAutoPriority Whether automatic exposure may reduce frame rate in low light.
      * @retval true The camera is open and the negotiated format is valid.
      * @retval false Device access, capability checks, or format negotiation failed.
-     * @note   Closes any previous device; the frame rate is a driver request and may be clamped or rejected; width(), height(), and bytesPerLine() report the negotiated geometry.
+     * @note   Closes any previous device; width(), height(), and bytesPerLine() report the negotiated geometry.
      */
     bool open(const string& device = "/dev/video0", int width = 640, int height = 480,
-              PixelFormat format = PixelFormat::YUYV, int frameRate = 30,
-              bool exposureAutoPriority = false);
+              PixelFormat format = PixelFormat::YUYV);
 
     /**
      * @brief  Map the camera buffers and start streaming capture.
