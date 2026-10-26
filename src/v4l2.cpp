@@ -31,19 +31,11 @@ int V4l2Capture::xioctl(int fd, unsigned long request, void* arg) {
     return ret;
 }
 
-/**
- * @brief  Open a camera and negotiate progressive YUYV or MJPEG capture.
- * @param  [in] device Camera device path.
- * @param  [in] width Requested positive, even image width.
- * @param  [in] height Requested positive image height.
- * @param  [in] format Requested camera pixel format.
- * @retval true The camera is open and the negotiated format is valid.
- * @retval false Device access, capability checks, or format negotiation failed.
- * @note   Closes any previous device; width(), height(), and bytesPerLine() report the negotiated geometry.
- */
-bool V4l2Capture::open(const string& device, int width, int height, PixelFormat format) {
+bool V4l2Capture::open(const string& device, int width, int height, PixelFormat format,
+                       int frameRate, bool exposureAutoPriority) {
     stop();
-    if (width <= 0 || height <= 0 || width % 2 || width > INT_MAX / 2) return false;
+    if (width <= 0 || height <= 0 || width % 2 || width > INT_MAX / 2 || frameRate <= 0)
+        return false;
     // Open the camera device.
     fd_ = ::open(device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if(fd_ < 0) {
@@ -101,6 +93,53 @@ bool V4l2Capture::open(const string& device, int width, int height, PixelFormat 
         ::close(fd_);
         fd_ = -1;
         return false;
+    }
+
+    struct v4l2_control exposurePriority{};
+    exposurePriority.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY;
+    exposurePriority.value = exposureAutoPriority ? 1 : 0;
+    if (xioctl(fd_, VIDIOC_S_CTRL, &exposurePriority) < 0) {
+        cerr << "[V4L2] Exposure auto priority control unavailable or rejected: "
+             << strerror(errno) << endl;
+    } else {
+        cout << "[V4L2] Exposure auto priority: "
+             << (exposureAutoPriority ? "enabled" : "disabled") << endl;
+    }
+
+    // Read the current stream parameters first; some drivers require this before S_PARM.
+    struct v4l2_streamparm streamParm{};
+    streamParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    const bool haveCurrentParameters = xioctl(fd_, VIDIOC_G_PARM, &streamParm) == 0;
+    const auto currentInterval = streamParm.parm.capture.timeperframe;
+    const bool currentMatches = haveCurrentParameters && currentInterval.numerator > 0 &&
+        currentInterval.denominator > 0 &&
+        static_cast<uint64_t>(currentInterval.denominator) ==
+            static_cast<uint64_t>(frameRate) * currentInterval.numerator;
+    bool frameRateSet = currentMatches;
+    if (!currentMatches) {
+        if (!haveCurrentParameters)
+            streamParm = v4l2_streamparm{};
+        streamParm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+        // Request the configured frame interval; drivers may clamp it to a supported mode.
+        streamParm.parm.capture.timeperframe.numerator = 1;
+        streamParm.parm.capture.timeperframe.denominator = static_cast<__u32>(frameRate);
+        if (xioctl(fd_, VIDIOC_S_PARM, &streamParm) < 0) {
+            cerr << "[V4L2] Frame-rate request " << frameRate
+                 << " FPS was not accepted: " << strerror(errno) << endl;
+            streamParm.parm.capture.timeperframe = v4l2_fract{};
+        } else {
+            frameRateSet = true;
+        }
+    }
+    const auto& selectedInterval = streamParm.parm.capture.timeperframe;
+    if (frameRateSet && selectedInterval.numerator && selectedInterval.denominator) {
+        cout << "[V4L2] Requested frame rate: " << frameRate
+             << " FPS; driver selected: "
+             << static_cast<double>(selectedInterval.denominator) / selectedInterval.numerator
+             << " FPS" << endl;
+    } else {
+        cout << "[V4L2] Requested frame rate: " << frameRate << " FPS" << endl;
     }
 
     // Validate the geometry negotiated by the driver.

@@ -97,13 +97,6 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
     return true;
 }
 
-/**
- * @brief  Scale and center a BGR frame in the visible framebuffer area.
- * @param  [in] bgr Nonempty CV_8UC3 input image.
- * @retval true The frame was written to the configured surface.
- * @retval false No surface is bound or the input image is invalid.
- * @note   Preserves aspect ratio, row padding, and nonvisible pages; OpenCV errors propagate.
- */
 bool FramebufferSurface::render(const cv::Mat& bgr) {
     if (!memory_ || bgr.empty() || bgr.type() != CV_8UC3)
         return false;
@@ -124,15 +117,31 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
     const int left = (screenWidth - width) / 2;
     const int top = (screenHeight - height) / 2;
 
+    const bool direct16 = bytes == sizeof(uint16_t);
+    const bool direct32 = bytes == sizeof(uint32_t);
+    if (direct16) packed16Row_.resize(static_cast<size_t>(width));
+    if (direct32) packed32Row_.resize(static_cast<size_t>(width));
+
     // Clear only when geometry changes; row padding and nonvisible pages stay untouched.
     if (sourceWidth_ != bgr.cols || sourceHeight_ != bgr.rows) {
         for (int y = 0; y < screenHeight; ++y) {
             uint8_t* row = memory_ +
                 (static_cast<size_t>(variable_.yoffset) + y) * fixed_.line_length +
                 static_cast<size_t>(variable_.xoffset) * bytes;
-            for (int x = 0; x < screenWidth; ++x) {
-                /* 刷成底色 */
-                std::memcpy(row + x * bytes, &alpha_, bytes);
+            if (alpha_ == 0) {
+                std::memset(row, 0, static_cast<size_t>(screenWidth) * bytes);
+            } else if (bytes == sizeof(uint16_t) &&
+                       (reinterpret_cast<uintptr_t>(row) % alignof(uint16_t) == 0)) {
+                auto* pixels = reinterpret_cast<uint16_t*>(row);
+                const uint16_t pixel = static_cast<uint16_t>(alpha_);
+                for (int x = 0; x < screenWidth; ++x) pixels[x] = pixel;
+            } else if (bytes == sizeof(uint32_t) &&
+                       (reinterpret_cast<uintptr_t>(row) % alignof(uint32_t) == 0)) {
+                auto* pixels = reinterpret_cast<uint32_t*>(row);
+                for (int x = 0; x < screenWidth; ++x) pixels[x] = alpha_;
+            } else {
+                for (int x = 0; x < screenWidth; ++x)
+                    std::memcpy(row + x * bytes, &alpha_, bytes);
             }
         }
         sourceWidth_ = bgr.cols;
@@ -143,10 +152,26 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
         uint8_t* destination = memory_ +
             (static_cast<size_t>(variable_.yoffset) + top + y) * fixed_.line_length +
             (static_cast<size_t>(variable_.xoffset) + left) * bytes;
-        for (int x = 0; x < width; ++x) {
-            const uint32_t pixel = alpha_ | redTable_[source[x][2]] |
-                                   greenTable_[source[x][1]] | blueTable_[source[x][0]];
-            std::memcpy(destination + x * bytes, &pixel, bytes);
+        if (direct16 && (reinterpret_cast<uintptr_t>(destination) % alignof(uint16_t) == 0)) {
+            for (int x = 0; x < width; ++x)
+                packed16Row_[static_cast<size_t>(x)] = static_cast<uint16_t>(
+                    alpha_ | redTable_[source[x][2]] |
+                    greenTable_[source[x][1]] | blueTable_[source[x][0]]);
+            std::memcpy(destination, packed16Row_.data(),
+                        static_cast<size_t>(width) * sizeof(uint16_t));
+        } else if (direct32 && (reinterpret_cast<uintptr_t>(destination) % alignof(uint32_t) == 0)) {
+            for (int x = 0; x < width; ++x)
+                packed32Row_[static_cast<size_t>(x)] = alpha_ |
+                    redTable_[source[x][2]] | greenTable_[source[x][1]] |
+                    blueTable_[source[x][0]];
+            std::memcpy(destination, packed32Row_.data(),
+                        static_cast<size_t>(width) * sizeof(uint32_t));
+        } else {
+            for (int x = 0; x < width; ++x) {
+                const uint32_t pixel = alpha_ | redTable_[source[x][2]] |
+                                       greenTable_[source[x][1]] | blueTable_[source[x][0]];
+                std::memcpy(destination + x * bytes, &pixel, bytes);
+            }
         }
     }
     drawPhotoButton();
@@ -337,6 +362,8 @@ void FramebufferSurface::reset() {
     memory_ = nullptr;
     sourceWidth_ = sourceHeight_ = 0;
     scaled_.release();
+    packed16Row_.clear();
+    packed32Row_.clear();
 }
 
 /**

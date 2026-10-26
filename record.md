@@ -1,105 +1,157 @@
-## 2026-10-22：建立摄像头到 LCD 的基础流水线
+## 2026-10-22：建立摄像头到 LCD 和 HTTP 的基础流水线
 
-&emsp;&emsp;这一阶段完成 V4L2、framebuffer、JPEG 和 HTTP 模块的基础串接。采集线程从摄像头取得 YUYV 帧，处理线程完成 YUYV 到 BGR 的转换、LCD 缩放显示和 JPEG 编码，主线程把最新 JPEG 发布给 HTTP 客户端。
+&emsp;&emsp;完成 V4L2、framebuffer、JPEG 和 HTTP 的基础串接。采集线程从 V4L2 MMAP 缓冲区复制帧到 `Frame::data`，处理线程完成图像转换、LCD 显示和 JPEG 编码，主线程发布最新 JPEG。
 
-&emsp;&emsp;方案取舍：采用 V4L2 MMAP 加一次用户态复制。直接在驱动映射区上处理可以减少一次复制，但驱动归还缓冲区后数据所有权不再稳定，会把采集、编码和队列生命周期绑定在一起；复制到 `Frame` 后，工作线程可以独立持有数据，关闭流程也更容易验证。队列采用固定容量并丢弃最旧帧，替代无限队列，因为视频应用更看重当前画面延迟，无限积压会让网页看到越来越旧的帧并消耗内存。
+&emsp;&emsp;方案取舍：使用一次用户态复制，把驱动缓冲区与后续线程的生命周期解耦。替代方案是直接处理 MMAP 区域，但驱动重新排队后数据所有权不稳定，关闭流程和线程同步更复杂。`raw`、`jpeg` 队列固定容量为 3，满载丢弃旧帧，优先控制实时延迟和内存占用。
 
-&emsp;&emsp;风险与边界：`bytesperline` 可能大于 `width * 2`，所以有效长度按 `(height - 1) * bytesperline + width * 2` 检查；只使用偶数宽度，避免 YUYV 的两个像素一组被截断。采集、编码和 HTTP 由不同线程执行，队列关闭必须唤醒等待者，退出时先关闭队列并 `join`，再释放摄像头和显存，避免工作线程访问已释放资源。
+&emsp;&emsp;风险与边界：YUYV 的有效长度必须按 `bytesperline` 检查，宽度必须为偶数；队列关闭必须唤醒等待线程，退出时先关闭队列并等待线程，再释放设备和显存。
 
-&emsp;&emsp;调试定位：早期黑边和画面偏移来自把可见坐标直接乘以 `width * bytes_per_pixel`，忽略了 framebuffer 的 `xoffset`、`yoffset` 和 `line_length`。通过构造带行填充、窗口偏移和保护区的测试显存，检查保护区是否被改写，最终统一使用 framebuffer 地址公式并补充 `test_video` 覆盖。
+&emsp;&emsp;调试定位：早期 LCD 黑边和偏移来自忽略 framebuffer 的 `xoffset`、`yoffset` 和 `line_length`。通过带行填充和窗口偏移的保护区测试定位，统一使用带 stride 的显存地址计算，并补充 `test_video`。
 
-&emsp;&emsp;性能观测：首先用 `top` 观察进程 CPU，再用 `v4l2-ctl` 检查格式和帧率声明，用日志记录处理帧率。主要成本是 BGR 转换、逐像素 LCD 写入和软件 JPEG；后续优化方向是复用转换结果、限制队列长度和减少不必要的帧处理。
+&emsp;&emsp;性能观测：使用 `top`、`v4l2-ctl` 和程序统计日志分别观察 CPU、摄像头能力和处理帧率。早期主要成本是 YUYV 转 BGR、逐像素 LCD 写入和软件 JPEG 编码。
 
-## 2026-10-24 00:07：加入 Haar 人脸检测和灰度比对
+## 2026-10-24：加入 Haar 人脸检测和灰度比对
 
-&emsp;&emsp;人脸分析使用 OpenCV Haar cascade，在独立 `FaceAnalysisWorker` 线程中处理抽样 BGR 帧；检测图宽度限制为 240 像素，检测框再映射回原图。可选参考图会被归一化为 64x64 灰度图，通过均衡化和平均绝对差计算 0..1 相似度。
+&emsp;&emsp;采用独立 `FaceAnalysisWorker` 线程处理抽样 BGR 帧，检测图宽度限制为 240 像素，检测框映射回原图；参考图归一化为 64x64 灰度图，用均衡化和平均绝对差计算相似度。
 
-&emsp;&emsp;方案取舍：选择 Haar cascade 是因为模型文件小、依赖简单，适合 i.MX6ULL 的部署和学习；替代方案是深度人脸检测或特征向量识别，鲁棒性更强但模型、内存和算力成本更高。这里的灰度差值只作为演示匹配，不能替代身份认证。
+&emsp;&emsp;方案取舍：选择 Haar cascade 是因为模型小、依赖少，适合 i.MX6ULL；深度检测和特征向量识别更鲁棒，但模型、内存和算力成本更高。灰度差值只用于演示匹配，不能替代身份认证。
 
-&emsp;&emsp;风险与边界：检测分辨率降低后，小脸、侧脸和遮挡场景更容易漏检；参考图为空时仍可检测，但不产生有效相似度。检测任务邮箱只保留一帧，新帧覆盖旧任务，避免检测延迟无限增长；停止时先关闭邮箱并唤醒条件变量，再等待分析线程退出。
+&emsp;&emsp;风险与边界：低分辨率会增加小脸、侧脸和遮挡场景的漏检；分析邮箱只保留一帧，新任务覆盖旧任务，避免检测延迟积累。模型加载失败只禁用人脸分析，不阻塞视频流水线。
 
-&emsp;&emsp;调试定位：模型路径错误曾导致分析初始化失败，但不应阻塞摄像头、LCD 和 HTTP。定位时区分“模型加载失败”和“没有检测到人脸”两类日志，并使用 `test_face_analyzer` 验证无效图片、空图像、相似度边界和 Haar 模型加载路径。
+&emsp;&emsp;调试定位：模型路径错误时区分“模型加载失败”和“没有检测到人脸”，使用 `test_face_analyzer` 验证空图像、无效模型和相似度边界。
 
-&emsp;&emsp;性能观测：用 `--face-interval` 控制抽样频率，比较 `8`、`12`、`16` 等值下的 CPU 和处理帧率。人脸检测必须与 LCD/JPEG 主路径隔离，否则单帧检测耗时会直接扩大视频延迟。
+&emsp;&emsp;性能观测：用 `--face-interval` 对比抽样频率和 CPU。人脸检测必须与 LCD/JPEG 主路径隔离，否则单帧检测耗时会直接增加视频延迟。
 
-## 2026-10-24 10:04：完善触摸拍照和坐标兼容
+## 2026-10-24：完善触摸拍照和坐标兼容
 
-&emsp;&emsp;触摸线程读取 Linux evdev 的释放事件，优先使用多点触摸位置轴，按 `EVIOCGABS` 的范围归一化到 framebuffer 可见尺寸，并只在释放位置命中 LCD 圆形按钮时保存最新 JPEG。触摸拍照和 HTTP `/snapshot` 共用保存、命名、目录创建、配额和写盘锁。
+&emsp;&emsp;触摸线程读取 evdev 释放事件，优先使用多点触摸坐标轴，按 `EVIOCGABS` 范围映射到 framebuffer；命中 LCD 圆形按钮后调用 `HttpServer::captureSnapshot()`。触摸拍照和 HTTP 截图共用最新 JPEG、目录、命名、配额和写盘锁。
 
-&emsp;&emsp;方案取舍：采用事件设备扫描和能力检测，替代硬编码某一个 `eventN` 的做法。默认仍尝试 `/dev/input/event1`，但自动扫描可以适应板卡设备编号变化；显式 `--touch PATH` 时保留严格失败语义，便于部署验收。
+&emsp;&emsp;方案取舍：采用事件能力扫描和坐标范围读取，替代硬编码某个 `eventN` 或固定坐标范围，以适应不同 BSP 的设备编号和触摸轴范围。显式 `--touch PATH` 保留严格失败语义，便于部署验收。
 
-&emsp;&emsp;风险与边界：部分 BSP 声明的 `ABS_X/ABS_Y` 范围与实际上报值不一致，超出范围时按屏幕最大坐标校正；坐标旋转和镜像仍由 BSP 负责。触摸线程只修改自己的输入状态，快照保存由 `HttpServer` 的互斥锁保护，因此并发触摸和 HTTP 截图不会同时通过配额检查写文件。
+&emsp;&emsp;风险与边界：部分 BSP 的声明范围与实际上报值不一致，越界值需要校正；旋转和镜像仍由 BSP 负责。触摸线程只维护输入状态，快照写盘由互斥锁保护。
 
-&emsp;&emsp;调试定位：遇到按钮点击无响应时，先看 `[Touch] Opened` 是否确认了按键和绝对轴，再看释放坐标是否落在按钮矩形内。发现坐标总落到右下角后，对比 `evtest` 原始值与 `EVIOCGABS` 范围，确认需要优先使用 `ABS_MT_POSITION_X/Y`，并增加越界校正日志。按钮只绘制到 LCD，不写入 JPEG，因此网页画面不应出现快门图标。
+&emsp;&emsp;调试定位：按钮无响应时先确认设备能力和释放事件；发现坐标总落在右下角后，对比 `evtest` 原始值与 `EVIOCGABS` 范围，改为优先使用 `ABS_MT_POSITION_X/Y` 并增加越界校正日志。
 
-&emsp;&emsp;性能观测：触摸等待使用 250 ms 的 `poll` 超时，不创建忙等循环；拍照写盘耗时不阻塞采集线程，但会占用快照互斥锁。可用 `ls -lh`、`df -h` 和日志中的保存路径确认文件是否生成以及存储是否接近配额。
+&emsp;&emsp;性能观测：触摸使用 250 ms `poll` 等待，不忙等；写盘耗时不阻塞采集线程，但会占用快照锁。
 
-## 2026-10-24 16:10：增加采集帧率、处理帧率和诊断日志
+## 2026-10-24：增加采集帧率、处理帧率和诊断统计
 
-&emsp;&emsp;在共享状态中增加原子采集帧计数，在处理线程中按一秒窗口计算 `CAP`、`FPS`、LCD 平均耗时和 JPEG 平均耗时；LCD 诊断面板同步显示这些数据。`CAM_DEBUG` 根据前台终端和环境变量控制高频诊断日志，启动、错误和照片结果日志保持可见。
+&emsp;&emsp;在共享状态中增加原子采集计数，在处理线程按一秒窗口计算 `CAP`、`FPS`、LCD 平均耗时和 JPEG 平均耗时。`CAP` 表示应用从 V4L2 成功取帧的速率，`FPS` 表示进入 HTTP 队列的处理速率。
 
-&emsp;&emsp;方案取舍：将 `CAP` 与 `FPS` 分开统计，替代只打印处理帧率。两者的差值可以判断瓶颈是在摄像头/驱动交付，还是在应用处理和队列积压；统计只读原子计数，不给采集线程增加互斥锁。日志默认在后台隐藏，替代无条件刷屏，避免日志 I/O 进一步影响 i.MX6ULL 的实时处理。
+&emsp;&emsp;方案取舍：分开统计 `CAP` 和 `FPS`，替代只打印处理帧率，便于区分摄像头/驱动瓶颈和应用处理瓶颈。高频日志默认受 `CAM_DEBUG` 控制，避免日志 I/O 影响实时处理。
 
-&emsp;&emsp;风险与边界：一秒窗口的首个样本受初始化时序影响，不能单独作为结论；`statsFrames` 非零时才计算平均耗时。原子计数只表示成功返回到应用的帧，不能证明摄像头传感器实际输出了声明的帧率。后台强制诊断可用 `CAM_DEBUG=1`，但高频日志仍会增加 CPU 和存储压力。
+&emsp;&emsp;风险与边界：首个统计窗口受启动时序影响；原子计数只代表应用成功收到的帧，不代表传感器实际输出能力。队列丢帧时 `CAP` 可以高于 `FPS`。
 
-&emsp;&emsp;调试定位：板端格式枚举和 `--set-parm=30` 都显示 30 FPS，但完整采集和 `v4l2-ctl` 实测约 14 FPS；这排除了仅由应用 LCD/JPEG 造成的解释。进一步观察到运行程序时 CPU 接近满载，`cam_server_arm` 约占 77% CPU；交互式 `top` 自身也会增加负载，因此性能测试需退出持续刷新的 `top` 后再测量。
+&emsp;&emsp;调试定位：板端曾出现格式声明 30 FPS、完整采集约 14 FPS 的情况；通过对比 `CAP/FPS`、`top` 和 `v4l2-ctl`，确认不能只根据格式列表判断实际吞吐。
 
-&emsp;&emsp;性能观测与优化：当前瓶颈可能同时来自摄像头/USB/驱动实际吞吐、软件 JPEG、YUYV 转换、逐像素 LCD 写入和人脸线程。按 `--no-lcd`、`--no-touch`、`--face-interval 120`、降低 JPEG 质量和降低采集分辨率逐项隔离；若 `CAP` 本身低，优先查 USB 链路、驱动和供电；若 `CAP` 高而 `FPS` 低，优先减少编码、显示或检测开销。后续可评估摄像头 MJPEG 直通 HTTP/截图和独立解码显示，但 LCD 仍需要解码，不能直接保证同样帧率。
+&emsp;&emsp;性能观测：用 `--no-lcd`、降低人脸分析频率、降低分辨率和 JPEG 质量逐项隔离处理成本；测试时退出持续刷新的 `top`，避免把监控工具负载计入结论。
 
-## 2026-10-25：增加 MJPEG 摄像头输入以降低处理负载
+## 2026-10-25：加入 MJPEG 直通和 LCD 刷新间隔
 
-&emsp;&emsp;最新板端观测中 `CAP` 约 25 FPS、处理 `FPS` 约 6 FPS，`cam_server_arm` 接近 99% CPU，user 与 softirq 合计约 96%。这表明摄像头已能提供较高帧率，主要矛盾转为单线程处理成本；旧链路每帧执行 YUYV 转 BGR、LCD 写入和软件 JPEG 编码。
+&emsp;&emsp;新增 MJPEG 摄像头输入。MJPEG 帧直接移动到 HTTP 输出，只有 LCD 或人脸分析需要时才调用 `cv::imdecode()`；`--lcd-interval` 控制 LCD 解码和刷新频率，`--face-interval` 控制分析抽样。
 
-&emsp;&emsp;方案取舍：新增 `--format mjpeg`，把相机压缩帧直接送入 HTTP/MJPEG 和截图，去掉软件 JPEG 编码；同时在 MJPEG 模式按需解码，`--lcd-interval` 控制 LCD 更新频率，`--face-interval` 控制人脸分析解码频率。相比提高线程数，这条路径直接移除每帧重编码工作，更适合 CPU 紧张的 i.MX6ULL；默认仍是 YUYV 以保持兼容。替代方案是硬件 JPEG 编码或零拷贝 DMA，需要板端驱动/编码器支持，暂不引入额外 BSP 依赖。
+&emsp;&emsp;方案取舍：摄像头 JPEG 直通可以去掉每帧软件 JPEG 编码，适合 i.MX6ULL。替代方案是硬件编码或 DMA 零拷贝，但依赖额外 BSP 能力。LCD 仍必须解码成 BGR 并写入 framebuffer。
 
-&emsp;&emsp;风险与边界：摄像头须支持指定 MJPEG 分辨率；MJPEG 模式中的 `--quality` 不生效，图像质量由摄像头控制。LCD 和人脸分析仍要把 JPEG 解码为 BGR，因此屏幕输出可能继续受解码、缩放和显存写入限制。坏 JPEG 会导致处理流水线报告错误；有限队列仍会丢弃旧帧以限制延迟和内存。
+&emsp;&emsp;风险与边界：摄像头必须支持指定的 MJPEG 尺寸和帧率；MJPEG 模式下 `--quality` 不影响摄像头内部编码。坏 JPEG 会终止处理流水线，有限队列仍会丢弃旧帧控制延迟。
 
-&emsp;&emsp;调试与验证：用 `v4l2-ctl --list-formats-ext` 确认 MJPEG 尺寸支持，再用程序启动日志确认协商结果为 `MJPEG`。对比同一设备、尺寸、LCD 和人脸参数下的 `CAP/FPS` 与 `top`；若 `FPS` 明显上升，说明软件 JPEG 编码是重要成本，若仍约 6 FPS，则继续测量 LCD 渲染与 MJPEG 解码。主机侧回归测试覆盖 MJPEG 格式协商、压缩短帧接收和 V4L2 缓冲区释放；板端 FPS 仍需实机测量。
+&emsp;&emsp;调试定位：板端实测 MJPEG 直通后 `JPEG` 约 0.002~0.007ms，说明软件 JPEG 编码已移除；LCD 间隔从 2 调整到 3 后，处理帧率由约 13~22 FPS 提升到接近 30 FPS，瓶颈集中在 MJPEG 解码、LCD 缩放和逐像素显存写入。
 
-&emsp;&emsp;性能观测：`CAP=25`、`FPS=6` 表示处理速率约为采集的四分之一，有限队列会主动丢弃旧帧而非持续增长延迟。MJPEG 直通预期降低 user CPU；若 softirq 仍高，USB/摄像头中断成本不会因去掉软件编码而消失。
-
-## 2026-10-25：板端验证 MJPEG 直通和 LCD 刷新间隔
-
-&emsp;&emsp;调试结果：`--format mjpeg --no-lcd --no-touch --face-interval 30` 下，稳定 `CAP/FPS` 约 14.3 FPS，`JPEG` 约 0.005~0.007ms；这证明输出路径已经直接复用摄像头 JPEG，软件 JPEG 编码不再是主要瓶颈。启用 `--fb /dev/fb0 --lcd-interval 2` 后，`CAP` 约 14~22 FPS，处理 `FPS` 约 13~22 FPS，LCD 单次刷新约 50~75ms；触摸启用后结果接近，触摸线程不是主要负载。
-
-&emsp;&emsp;方案取舍：LCD 仍保留 BGR 解码和现有 framebuffer 写入，原因是 MJPEG 压缩数据不能直接写入 RGB565 显存。`--lcd-interval 2` 只降低显示刷新频率，网页仍发布每个相机 JPEG，兼顾实时网络流和板端显示成本。进一步提高间隔可以提升处理帧率，但 LCD 画面更新时间会变慢。
-
-&emsp;&emsp;风险与边界：统计中的 `JPEG` 在 MJPEG 模式只包含 JPEG 数据移动时间，不代表摄像头压缩耗时；`LCD` 是实际显示帧的平均耗时，不能简单乘以输入帧率作为总 CPU 占用。LCD 每次刷新约 50~75ms 时，单线程显示路径仍可能限制可见画面帧率。人脸检测按 30 帧抽样，在 30 FPS 输入下理论反馈间隔约 1 秒，队列丢帧或检测线程繁忙时会更长。
-
-&emsp;&emsp;后续优化：优先尝试 `--lcd-interval 3` 或 `4`，比较显示流畅度和 `FPS`；若仍需更高 LCD 帧率，应把显示缩放和像素打包改为行级批量写入，或使用 BSP 提供的硬件合成/双缓冲接口。继续增加采集队列数量不会解决当前 LCD 处理耗时，只会改变丢帧和延迟特征。
-
-## 2026-10-25：LCD 每三帧刷新时接近 30 FPS
-
-&emsp;&emsp;测试结果：在 640x480 MJPEG 模式下使用 `--lcd-interval 3 --face-interval 30`，稳定阶段 `CAP` 约 29~31 FPS、处理 `FPS` 约 26~29 FPS，`LCD` 单次刷新约 59~82ms，`JPEG` 数据复用约 0.002ms。打开触摸设备后的帧率与关闭触摸时接近。开头数秒曾出现约 10 FPS，之后提升并稳定在接近 30 FPS；因此旧的约 14 FPS 数据是一次条件相关测量，不能据此判断摄像头硬件固定上限。
-
-&emsp;&emsp;性能原因：MJPEG 相机帧直接进入 HTTP 和快照，省去了每帧 YUYV 转换及软件 JPEG 编码。LCD 只在每三个处理帧中解码、缩放和写显存一次，显示开销约降为每帧刷新方案的三分之一；人脸分析每 30 帧抽样一次。余下两帧仍可直接作为 JPEG 发布，所以网页约 26~29 FPS，而 LCD 实际更新约 9~10 次/秒。
-
-&emsp;&emsp;方案取舍：`--lcd-interval 3` 是网络流畅度与实体屏刷新率之间的折中。改为 `2` 时可见刷新更频繁，但此前处理帧率约 13~22 FPS；改为 `4` 有望进一步释放 CPU，但 LCD 动画会更不连贯。`JPEG≈0.002ms` 只是应用内复用压缩帧的开销，不是相机编码时间，也不能单独证明端到端延迟。
-
-&emsp;&emsp;风险与后续定位：`CAP` 和 `FPS` 按独立的一秒窗口计数，启动时以及队列跨窗口时会短暂不一致；需以稳定多行和持续运行测量为准。若启动后长时间停在约 10 FPS，应同步检查摄像头自动曝光、V4L2 实际帧间隔、USB/软中断负载，并在不运行 `top` 的条件下重复测试。接下来可比较 LCD 间隔 3 和 4，记录屏幕可见流畅度、网页 FPS、CPU 和温度。
+&emsp;&emsp;性能观测：`--lcd-interval 3` 是网络输出和 LCD 刷新成本的折中，网页仍发布每个处理到的 JPEG，LCD 实际刷新约为处理帧率的三分之一。
 
 ## 2026-10-25：完成 menuconfig 到 C++ 头文件的配置链路
 
-&emsp;&emsp;后备 `whiptail` 界面随后改为分层菜单：主菜单进入摄像头、LCD/触摸或处理输出分类，分类菜单进入具体配置项，选择项使用上下键和回车确认，取消配置项不会覆盖旧值，返回上一级后可以继续修改，主菜单的 `Save and exit` 才会原子写入 `.config`。
+&emsp;&emsp;`config/Kconfig` 描述配置模型，`make menuconfig` 使用 `kconfig-mconf` 或 `whiptail`，结果写入 `.config`；`scripts/gen_config.sh` 将配置转换为 `build/generated_config.hpp`，主机和 ARM 构建共用该链路。
 
-&emsp;&emsp;界面配色使用 `NEWT_COLORS` 设置为蓝色背景、白色文字和青色选中项，模拟内核 `menuconfig` 的蓝色 ncurses 页面。配色只作用于后备 `whiptail` 界面；如果系统安装了 `mconf`，仍使用标准 Kconfig 界面。
+&emsp;&emsp;方案取舍：选择生成头文件而不是让程序运行时解析 `.config`，因为设备路径、分辨率、开关和端口可在编译期进入默认值，目标程序不需要携带配置解析器。替代方案是 Make 直接 `include .config`，但需要额外处理 Kconfig 字符串、布尔值和 C++ 转义。
 
-&emsp;&emsp;随后发现系统安装的实际命令名是 `kconfig-mconf`，脚本只检测 `mconf` 导致始终误用 `whiptail`。修复后按 `MCONF`、`mconf`、`kconfig-mconf` 顺序探测，当前环境会进入真正的内核 Kconfig 界面；这解释了此前“全蓝但不像内核界面”的现象。
+&emsp;&emsp;风险与边界：`.config` 是文本文件，只有生成脚本理解其语义；配置修改后必须重新生成头文件并重新链接程序。分辨率、格式和间隔使用固定选项，手工写入不支持的值会被拒绝或回退。
 
-&emsp;&emsp;将启动参数对应关系补齐到 Kconfig：`CAM_TOUCH_DEVICE` 默认生成 `--touch /dev/input/event1`，LCD 间隔选择 `CAM_LCD_INTERVAL_3` 后生成 `CAM_CONFIG_LCD_INTERVAL 3`，人脸间隔选择 `CAM_FACE_INTERVAL_30` 后生成 `CAM_CONFIG_FACE_INTERVAL 30`。两个间隔使用 choice 固定选项，避免在内核式菜单中再次出现任意数字输入。
+&emsp;&emsp;调试定位：后备菜单第一次读取旧值失败，是调用方使用 `CAM_*` 名称而读取函数只匹配 `CONFIG_CAM_*`；统一补齐前缀后，用已有 `.config` 验证旧值继承，并用 `make -n` 检查依赖顺序。
 
-&emsp;&emsp;本次继续完成配置入口：`config/Kconfig` 描述配置模型，`make menuconfig` 在有 `mconf` 时使用 Kconfig 界面，否则使用 `whiptail` 菜单后备界面；配置结果写入 `.config`，`scripts/gen_config.sh` 再生成 `build/generated_config.hpp`。格式、分辨率和数值参数改为固定选项，分辨率使用 `320x240`、`640x480`、`800x600`、`1280x720`、`1280x1024` 预设。Makefile 通过 `generated_config.hpp: .config scripts/gen_config.sh` 和主程序目标依赖保证配置先转换、再编译；ARM Makefile 复用同一链路，只替换编译器和输出目录。
+## 2026-10-25：梳理数据流和共享边界
 
-&emsp;&emsp;方案取舍：选择生成头文件而不是让程序在运行时解析 `.config`，因为设备路径、尺寸、开关和端口可以在编译期进入默认值，板端程序不需要携带配置解析器；替代方案是 `include .config` 让 Make 变量直接传给编译器，但 Kconfig 字符串引号、`y/n` 布尔值和 C++ 字符串转义需要额外处理，且会让 Makefile 变量命名与 C++ 宏耦合。当前生成脚本集中完成类型转换和尺寸校验，便于主机、ARM 两种构建复用。
+&emsp;&emsp;数据经过 `V4l2Capture::getFrame()`、`Frame::data`、`raw` 队列、`JpegEncoder::bgr_` 或 MJPEG `decoded`、`encoded.data`、`jpeg` 队列，最后进入 `HttpServer::latestFrame_`。HTTP `/stream`、`/snapshot` 和触摸拍照共享最新 JPEG；LCD 使用 BGR 图像写入显存，不与 HTTP 共用同一块像素内存。
 
-&emsp;&emsp;风险与边界：`.config` 是文本格式，Make 不会自动理解其中的 `CONFIG_*` 语义；只有生成规则读取它。分辨率只能使用五个预设，手工写入其他分辨率时脚本会拒绝生成头文件；其他配置项通过菜单选项或命令行参数校验。`mconf` 与 `whiptail` 的交互结果都必须完整写回 `.config`，中途取消时临时文件会被清理，避免半份配置覆盖旧配置。配置修改后若只运行旧二进制不会生效，必须让 `make` 重新生成头文件并链接程序。
+&emsp;&emsp;方案取舍：YUYV 只做一次 YUYV 到 BGR 转换，LCD 和 JPEG 复用结果；MJPEG 直接复用压缩数据，按需解码显示。这样减少重复转换和编码，代价是 LCD 与网页更新时间可能不同。
 
-&emsp;&emsp;调试定位：首次验证简化菜单时发现输入框显示的旧值没有被读取，原因是调用方传入 `CAM_CAMERA_WIDTH`，读取函数却只匹配 `CONFIG_CAM_CAMERA_WIDTH`。修复后在读取函数内部统一补齐 `CONFIG_` 前缀，并用已有 `.config` 重新进入菜单确认值能够继承；随后用 `make -n` 检查依赖顺序，用 `sh scripts/gen_config.sh` 检查宏输出。这个问题说明菜单能显示并保存不等于配置可持续编辑，必须验证“旧配置读取”和“新头文件生成”两个方向。
+&emsp;&emsp;风险与边界：`latestFrame_` 由 `frameMutex_` 保护，快照配额和写盘由 `snapshotMutex_` 保护；LCD 按钮和统计文字只写显存，不会进入 JPEG。队列丢帧和 LCD 刷新间隔会造成两个输出的帧序号不同步。
 
-&emsp;&emsp;性能与观测：配置生成只在 `.config` 或脚本更新时间变化时执行，开销是一次小型 shell 文本转换，不在摄像头运行时路径上。用 `make -n cam_server` 可以观察是否会先调用生成脚本；用 `stat .config build/generated_config.hpp` 可以核对时间戳；用 `sed -n` 查看生成宏；最终用 `strings build/cam_server` 或 `./build/cam_server --help` 检查编译进去的默认值。若修改配置后目标没有重编译，应先检查目标是否依赖 `$(CONFIG_HEADER)`，以及是否误用了旧的 `OBJ_DIR`。
+## 2026-10-25：修复帧率配置回归
 
-## 复现与验收记录
+&emsp;&emsp;问题现象：修改前约 30 FPS，增加帧率配置后稳定约 10 FPS。`v4l2-ctl` 仍显示设备声明 30 FPS，程序关闭 LCD、触摸、人脸后 `CAP` 与 `FPS` 仍约 10，说明问题不在图像处理。
 
-&emsp;&emsp;主机侧使用 `make -B cam_server build/test_face_analyzer test_video test_v4l2` 编译，已验证人脸分析、视频显存保护和模拟 V4L2 故障路径；`./build/cam_server --help` 验证启动参数。ARM 版本使用 `make -B -f Makefile.arm package_arm` 生成程序、模型和 OpenCV 动态库目录。
+&emsp;&emsp;调试定位：新增的 `VIDIOC_S_PARM` 是首个回归点。旧代码不设置 stream 参数，驱动保留默认 30；直接使用零初始化的 `v4l2_streamparm` 可能覆盖驱动需要保留的参数。现改为先 `VIDIOC_G_PARM`，当前值已等于请求值时跳过 `S_PARM`，只有切换 10/20/30 时才修改 `timeperframe`。
 
-&emsp;&emsp;板端验收应记录摄像头协商分辨率、`CAP/FPS`、LCD/JPEG 耗时、CPU、内存、温度和 `dmesg` 中的 USB/摄像头错误。还需验证触摸按钮坐标、重复拍照序号、HTTP `/snapshot` 与触摸拍照的配额一致性，以及 Ctrl-C/SIGTERM 后设备可以再次打开。
+&emsp;&emsp;风险与边界：`driver selected: 30 FPS` 只是 ioctl 返回的名义值，实际帧率必须看完整采集窗口的 `CAP`。驱动可能接受参数但因曝光、USB 或传感器状态实际只交付 10 FPS。
+
+&emsp;&emsp;验证方法：`test_v4l2` 覆盖默认 30 FPS 和 MJPEG 20 FPS 的请求；ARM 包重新生成后，启动日志需要同时记录 requested 和 driver selected，板端还需用独立 `v4l2-ctl` 连续采集验证。
+
+## 2026-10-25：排查 USB OTG 和 UVC 实际帧率
+
+&emsp;&emsp;板卡曾将 USB OTG 从 Host 切换为 Gadget Device，用于手机和 ADB。这可能改变 USB 控制器角色、供电和中断负载；若摄像头与 Gadget 共用同一物理口，两个功能无法同时作为独立链路工作。
+
+&emsp;&emsp;板端实测 MJPEG 和 YUYV 都稳定约 10 FPS，即使关闭 LCD、触摸、人脸和软件 JPEG，因此应用处理路径不是瓶颈。`lsusb -t` 显示摄像头以 480M High-Speed 挂在 `ci_hdrc.1` 的 Hub 下，可以排除 Full-Speed 12M 带宽不足；`dmesg` 中曾出现摄像头断开、UVC 注销和重新枚举，说明 USB Hub、供电或 OTG 角色切换造成过设备复位。
+
+&emsp;&emsp;下一步方案：恢复 OTG Host、停止 Gadget/ADB 或改用独立 Host 口，在相同分辨率和格式下重复连续采集；同时检查 `exposure_auto_priority`，低照度自动曝光也可能使实际帧率降到 10。只有在 Host/Gadget 对照后恢复到 30 FPS，才能确认 OTG 资源冲突；否则继续定位 UVC 曝光控制、供电和 USB 复位。
+
+&emsp;&emsp;性能观测：使用 `v4l2-ctl --list-formats-ext` 查看能力，`--get-parm` 查看名义参数，使用 `--stream-mmap --stream-count` 测量实际帧率，并结合 `dmesg`、`top` 的 softirq 和程序 `CAP` 统计判断真实瓶颈。
+
+## 2026-10-26：实现 LCD 多进程与共享内存解耦
+
+&emsp;&emsp;当前 `encodeLoop()` 原先在同一个线程中完成 MJPEG 解码、LCD 缩放与逐像素写入、JPEG 发布；即使已经把人脸检测放到独立线程，i.MX6ULL 的单核 CPU 仍会被这些工作共同占满。多线程只能改善等待和流水线重叠，不能增加单核总算力。本次新增 `LcdProcess`，由父进程创建三槽匿名共享内存并在启动应用线程前 `fork` LCD 子进程；父进程继续处理采集、HTTP 和人脸分析，子进程独占 framebuffer 完成 LCD 刷写。
+
+&emsp;&emsp;方案取舍：本次选择共享内存传递连续 BGR 帧，槽位按 `FREE/WRITING/READY/READING` 状态变化，满载时丢弃最旧 READY 帧。相比管道或 Unix socket，它避免了额外序列化并能固定内存上限；相比父进程预先生成 RGB565，它暂时不把缩放和像素转换移回父进程，改造范围更小，但 LCD 子进程仍承担这些 CPU 工作。后续只有在确认共享内存复制和父进程 CPU 余量足够时，才考虑改成 RGB565 行缓冲。
+
+&emsp;&emsp;风险与线程/进程安全：`fork` 在应用线程启动前执行，避免子进程继承其他线程持有的 C++ 或 OpenCV 锁。共享控制块使用 `PTHREAD_PROCESS_SHARED` mutex/condition variable；普通 `std::mutex` 不用于跨进程同步。父进程保留 framebuffer 对象只读取屏幕尺寸和触摸按钮几何，LCD 子进程负责实际写入。父进程通过 `waitpid(WNOHANG)` 发现子进程退出，停止发布并在退出时先唤醒、等待子进程，再销毁同步对象和解除映射。当前仍需在板端验证摄像头 fd 在 LCD 子进程退出前的生命周期，以及 LCD 驱动异常时的退出时延。
+
+&emsp;&emsp;调试定位：实现阶段首先遇到共享控制块前置声明与源文件匿名类型冲突，编译器将 `LcdSharedState` 识别为两个不同类型；将控制块定义移到源文件全局作用域后恢复一致。随后发现 `fork` 必须早于 HTTP、采集和人脸线程，最终把 LCD 子进程启动放在摄像头格式协商之后、`capture.start()` 之前。主机侧没有真实 framebuffer，无法模拟子进程刷屏；因此目前用主程序编译和现有视频/V4L2/人脸测试验证接口，板端还需确认共享槽位序号、旧帧丢弃和子进程退出。
+
+&emsp;&emsp;性能瓶颈与优化：LCD 的主要成本仍是缩放、BGR 到 framebuffer 像素打包和显存写入；MJPEG 直通已经移除了软件 JPEG 编码。板端实测在摄像头捕获约 30 FPS 时，采用多进程和共享内存后 LCD 刷新达到约 17~21 FPS，父子两个进程的 CPU 占用合计约 50%。这说明 LCD 刷新不再串行阻塞图像处理主流程，同时本次测量仍留有 CPU 余量；结果只适用于当前板卡、图像格式、分辨率和 LCD 配置。后续可按行批量写入 RGB565、减少显示缩放成本或调用 BSP 硬件合成，并继续记录各进程 CPU、`CAP/FPS/LCD`、共享槽位丢帧和端到端延迟。
+
+## 2026-10-26：确认 v4l2-ctl 当前模式实际约 10 FPS
+
+&emsp;&emsp;板端执行 `v4l2-ctl -d /dev/video1 --stream-mmap --stream-count=100`，测得 11.86 FPS 逐步稳定到 10.23 FPS。这个命令没有包含 `--set-fmt-video` 或 `--set-parm=30`，因此它测量的是设备当前已经配置的格式、分辨率和帧间隔，不能单独证明设备不支持 30 FPS。工程 `.config`、`config/cam_defconfig` 和生成头文件默认请求值均为 30 FPS。
+
+&emsp;&emsp;方案取舍：先用 v4l2-ctl 独立于应用验证“显式请求后的实际采集”，再判断程序的 `VIDIOC_S_PARM` 是否生效；替代方案是直接根据 `v4l2-ctl --list-formats-ext` 的能力列表下结论，但能力列表只表示某个特定格式/分辨率组合可能支持的离散帧间隔，不代表当前模式已经使用该帧率。
+
+&emsp;&emsp;风险与边界：如果 `--get-parm` 显示 30 FPS 但连续采集仍约 10 FPS，原因应转向自动曝光、USB 链路/带宽、UVC 驱动或供电复位；如果显式 `--set-parm=30` 后驱动回报 10 FPS，则是该格式和分辨率组合未提供 30 FPS。还要分别测试 MJPEG 与 YUYV，因为 640x480 YUYV 30 FPS 的带宽和摄像头模式约束明显高于 MJPEG。
+
+&emsp;&emsp;调试定位：下一步固定执行 `--set-fmt-video=width=640,height=480,pixelformat=MJPG`、`--set-parm=30`、`--get-fmt-video --get-parm`，再连续采集 300 帧；随后对 YUYV 重复同样流程。若两种格式都实际 10 FPS，再检查 `exposure_auto_priority`、`lsusb -t` 和 `dmesg`，避免把应用 CPU 或 LCD 进程误判为摄像头帧率上限。
+
+&emsp;&emsp;性能观测：独立 v4l2-ctl 测试时停止 `cam_server_arm`，记录协商格式、驱动回报帧间隔、实际采集耗时和 `dmesg`。应用运行时再对照启动日志中的 `Requested frame rate`、`driver selected` 和 `[Stats] CAP`；只有三者在相同格式、分辨率、曝光和 USB 条件下对照，才能确定 10 FPS 的来源。
+
+## 2026-10-26：确认帧率随照度从 10 FPS 变化到 30 FPS
+
+&emsp;&emsp;板端对照结果：普通光照下实际约 10 FPS，手电筒强光照射后达到约 30 FPS。该对照使摄像头低照度自动曝光成为最符合现有证据的原因：低照度时摄像头延长曝光以保持画面亮度，实际帧间隔随之增加；强光下曝光缩短后恢复到请求的 30 FPS。应用当前仅通过 V4L2 请求帧率，没有设置曝光或 `exposure_auto_priority`。
+
+&emsp;&emsp;方案取舍：先用同一格式、分辨率和 USB 连接，在应用关闭时比较 `v4l2-ctl --stream-mmap` 的实际帧率，隔离摄像头输出与应用处理；检查设备是否提供 `exposure_auto_priority` 控件。若支持，可临时设为 0 对照低照度帧率，观察是否稳定在 30 FPS。关闭自动曝光优先可能导致暗处画面变暗，因此是否在程序中加入可配置曝光策略，应依据目标画质决定。
+
+&emsp;&emsp;风险与边界：强光/普通光对照尚未同时记录 `[Stats] CAP`、曝光值和独立 v4l2-ctl 数据，所以自动曝光目前是高可信解释而非完全排除 UVC 驱动行为的证明。若应用 `CAP` 随光照变化，变化发生在摄像头/驱动采集侧；若 `CAP` 不变而处理 `FPS` 变化，才应回到应用 CPU、LCD 和处理队列分析。`driver selected: 30 FPS` 仍只是驱动参数回报，不代表暗处实际帧率。
+
+&emsp;&emsp;调试定位：之前只看到稳定约 10 FPS，曾怀疑新增的 `VIDIOC_S_PARM` 或 USB/OTG；手电筒强光下恢复 30 FPS 后，应用固定处理负载和 USB 连接不变而实际帧率随照度改变，使曝光策略成为首要检查点。下一步应记录 `v4l2-ctl --list-ctrls`、`--get-ctrl=exposure_auto_priority` 和实际采集帧率，并在支持时对比 `--set-ctrl=exposure_auto_priority=0`。
+
+&emsp;&emsp;性能观测：低照度帧率受限时，降低应用分辨率或关闭 LCD 不会缩短摄像头曝光；应结合 V4L2 控件、`CAP`、完整采集窗口和图像亮度观测。若关闭曝光优先后帧率上升但图像欠曝，需在帧率与低照度画质之间取舍，或补光/调整固定曝光，而不是继续优化 JPEG/LCD 路径。
+
+## 2026-10-26：加入自动曝光帧率优先级配置
+
+&emsp;&emsp;为适配普通光约 10 FPS、手电筒强光约 30 FPS 的板端现象，在 `Camera input` 配置中加入 `CAM_EXPOSURE_AUTO_PRIORITY`，并通过生成头文件传入 V4L2 采集初始化。选项关闭时向摄像头请求保持帧率；开启时允许自动曝光在低照度下动态降低帧率。此设置控制曝光算法能否改变帧率，不会直接指定曝光时间或模拟增益。
+
+&emsp;&emsp;方案取舍：使用内核标准 `V4L2_CID_EXPOSURE_AUTO_PRIORITY` 而不是硬编码曝光绝对值，因为不同摄像头的传感器、镜头和增益范围不同，自动曝光仍可随环境亮度调节。默认关闭以优先兑现用户请求的 30 FPS；需要暗处画面亮度时可在菜单开启，代价是帧率可降。若设备驱动不支持该控件，应用继续工作并输出警告。
+
+&emsp;&emsp;风险与边界：V4L2 控件支持情况取决于摄像头和驱动；开关关闭也不能保证所有设备一定能达到请求帧率。低照度下固定帧率可能导致曝光不足或噪声上升。之后如需手动曝光时间和增益，需要分别查询控件范围、维护自动/手动模式切换，并保证曝光时间小于目标帧周期。
+
+&emsp;&emsp;调试定位：新增模拟 V4L2 测试，验证默认关闭时写入 0、开启时写入 1，以及驱动拒绝 `VIDIOC_S_CTRL` 时采集仍能打开。板端需用 `v4l2-ctl --list-ctrls` 确认控件存在，并在相同照度下比较应用 `CAP` 和画面亮度；主机模拟测试不能代替真实摄像头验证。
+
+&emsp;&emsp;性能观测：菜单选项只在摄像头初始化时设置一次，不增加逐帧处理开销。对照测试应停止应用后确认当前控制值，再启动应用并记录启动日志、`CAP/FPS`、CPU 和画面亮度；若开关状态无法读取或设置失败，以驱动日志和帧间隔为准。
+
+## 2026-10-26：板端验证多进程 LCD 刷新性能
+
+&emsp;&emsp;测试结果：摄像头捕获保持约 30 FPS 时，多进程加共享内存的 LCD 刷新率达到约 17~21 FPS，父子两个进程 CPU 占用合计约 50%。本次数据表明 LCD 子进程能在不阻塞主处理流程的情况下持续刷新，仍有部分输入帧未显示。
+
+&emsp;&emsp;方案取舍：保留共享内存三槽和只消费最新帧的策略，使 LCD 负载跟不上时丢弃过期显示帧，而不是积压帧队列并增加画面延迟。该方案提升了 LCD 刷新率并隔离刷新阻塞，但不会让 LCD 追平摄像头的 30 FPS，也不会消除缩放和 framebuffer 写入成本。
+
+&emsp;&emsp;风险与边界：17~21 FPS 和约 50% CPU 是当前板卡、输入格式/尺寸、LCD 模式及其他运行负载下的实测值，不代表所有配置均有相同表现。CPU 百分比需区分单个进程与父子进程合计，并避免将 `top` 自身开销计入结果。共享槽位丢帧属于实时显示取舍，HTTP 的处理帧率与 LCD 刷新率也不是同一指标。
+
+&emsp;&emsp;调试定位：此前担心单核 i.MX6ULL 上增加进程不能提高处理能力；本次运行数据确认它的作用是隔离 LCD 刷新与主处理流程的调度，LCD 更新达到 17~21 FPS，而捕获仍约 30 FPS。当前没有发现因共享内存导致的采集帧率下降；后续需结合共享槽位丢帧统计、`CAP/FPS/LCD` 和端到端延迟持续观察。
+
+&emsp;&emsp;性能观测与优化：本次父子进程 CPU 合计约 50%，后续应分别记录两进程 CPU 和系统总 CPU，并固定摄像头格式、分辨率、LCD 间隔及人脸检测频率做对照。可进一步按行批量写入 RGB565、降低显示缩放成本或使用 BSP 硬件合成；优化后同时比较 LCD 刷新率、丢弃帧数、画面延迟和 CPU，确认没有把负载转移到主进程。

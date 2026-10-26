@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include <string>
 #include <utility>
 #include <linux/fb.h>
@@ -92,6 +93,8 @@ private:
     uint32_t greenTable_[256]{};
     uint32_t blueTable_[256]{};
     uint32_t alpha_ = 0;
+    std::vector<uint16_t> packed16Row_;
+    std::vector<uint32_t> packed32Row_;
     int sourceWidth_ = 0;
     int sourceHeight_ = 0;
 
