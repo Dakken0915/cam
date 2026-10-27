@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <vector>
 #include <linux/fb.h>
 #include <opencv2/core.hpp>
 
@@ -18,6 +19,7 @@ struct PhotoButton {
 struct DisplayStats {
     double captureFps = 0.0;
     double fps = 0.0;
+    double lcdFps = 0.0;
     double lcdMs = 0.0;
     double jpegMs = 0.0;
 };
@@ -84,6 +86,16 @@ public:
     void reset();
 
 private:
+    friend class FramebufferDisplay;
+
+    /**
+     * @brief  Select the framebuffer page used by subsequent drawing operations.
+     * @param  [in] page Zero-based page index in the configured virtual framebuffer.
+     * @retval true The page is available and selected.
+     * @retval false The surface is unconfigured or the page is outside the buffer.
+     */
+    bool setPage(uint32_t page);
+
     uint8_t* memory_ = nullptr;
     fb_fix_screeninfo fixed_{};
     fb_var_screeninfo variable_{};
@@ -94,6 +106,10 @@ private:
     uint32_t alpha_ = 0;
     int sourceWidth_ = 0;
     int sourceHeight_ = 0;
+    std::vector<uint8_t> packedRow_;
+    uint32_t pageCount_ = 1;
+    uint32_t page_ = 0;
+    uint32_t initializedPages_ = 0;
 
     uint32_t packPixel(uint8_t blue, uint8_t green, uint8_t red) const;
     void drawPhotoButton();
@@ -171,6 +187,20 @@ private:
     uint8_t* memory_ = nullptr;
     size_t length_ = 0;
     FramebufferSurface surface_;
+    fb_var_screeninfo variable_{};
+    uint32_t baseYOffset_ = 0;
+    uint32_t frontPage_ = 0;
+    uint32_t backPage_ = 0;
+    bool doubleBuffered_ = false;
+    int vsyncState_ = -1;
+
+    /**
+     * @brief  Present a rendered page through the framebuffer page-flip ioctl.
+     * @param  [in] page Zero-based page index to make visible.
+     * @retval true The page was presented, or single-buffer fallback was enabled.
+     * @retval false The display is unavailable or the page index is invalid.
+     */
+    bool presentPage(uint32_t page);
 };
 
 #endif

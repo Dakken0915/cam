@@ -16,6 +16,7 @@
 #include "http_server.hpp"
 #include "frame.hpp"
 #include "bounded_queue.hpp"
+#include "lcd_process.hpp"
 #include "debug.hpp"
 #include "generated_config.hpp"
 
@@ -229,7 +230,7 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
  * @brief  Convert each frame once, optionally display it, and enqueue JPEG output.
  * @param  [in,out] raw Source queue for YUYV frames.
  * @param  [in,out] jpeg Destination queue for encoded frames.
- * @param  [in,out] display Display object used when LCD output is active.
+ * @param  [in,out] lcd LCD process controller used when LCD output is active.
  * @param  [in] lcdActive Whether the display was initialized.
  * @param  [in] quality JPEG quality in the range 1 to 100 for YUYV input.
  * @param  [in] mjpegInput Whether camera payloads are already JPEG-compressed.
@@ -238,10 +239,10 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
  * @param  [in,out] faceWorker Background Haar detector and optional comparator.
  * @param  [in] faceActive Whether face analysis was initialized successfully.
  * @param  [in,out] state Shared failure and shutdown state.
- * @note   Reports captured and processed FPS; LCD and JPEG work is serial in this thread.
+ * @note   Reports captured and processed FPS; LCD frames are published through shared memory.
  */
 void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
-                FramebufferDisplay& display, bool lcdActive, int quality, bool mjpegInput,
+                LcdProcess& lcd, bool lcdActive, int quality, bool mjpegInput,
                 int lcdInterval, int faceInterval,
                 FaceAnalysisWorker& faceWorker, bool faceActive, PipelineState& state) {
     try {
@@ -250,9 +251,7 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
         auto statsStart = Clock::now();
         uint64_t lastCapturedFrames = state.capturedFrames.load();
         uint64_t statsFrames = 0;  /* frame count */
-        double displayMs = 0.0;
         double encodeMs = 0.0;
-        uint64_t displayFrames = 0;
         uint64_t inputFrames = 0;
 
         JpegEncoder encoder;
@@ -288,15 +287,12 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 else faceWorker.submit(*bgr);
             }
 
-            /* LCD 绘制 */
             if (renderFrame) {
-                /* 统计帧缓冲区渲染输出到 LCD 屏幕的耗时 */
-                const auto displayStart = Clock::now();
-                if(!bgr || !display.render(*bgr))
-                    throw std::runtime_error("LCD rendering failed");
-                displayMs += std::chrono::duration<double, std::milli>(Clock::now() - displayStart).count();
-                ++displayFrames;
+                if (!bgr || !lcd.publish(*bgr, frame.sequence))
+                    throw std::runtime_error("LCD frame publish failed");
             }
+            if (lcdActive && !lcd.healthy())
+                throw std::runtime_error("LCD process stopped");
             Frame encoded;
             encoded.sequence = frame.sequence;
             encoded.width = frame.width;
@@ -322,22 +318,22 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 stats.fps    = statsFrames / elapsed;
                 const uint64_t capturedFrames = state.capturedFrames.load();
                 stats.captureFps = (capturedFrames - lastCapturedFrames) / elapsed;
-                stats.lcdMs  = displayFrames ? displayMs / displayFrames : 0.0;
+                uint64_t renderedFrames = 0;
+                lcd.takeRenderStats(stats.lcdMs, renderedFrames);
+                stats.lcdFps = renderedFrames / elapsed;
                 stats.jpegMs = encodeMs / statsFrames;
 
-                if(lcdActive)
-                    display.renderStats(stats);
+                if (lcdActive) lcd.updateStats(stats);
 
                 CAM_DEBUG("[Stats] CAP=" << stats.captureFps
                           << " FPS=" << stats.fps
+                          << " LCD_FPS=" << stats.lcdFps
                           << " LCD=" << stats.lcdMs << "ms"
                           << " JPEG=" << stats.jpegMs << "ms");
 
                 statsStart = now;
                 lastCapturedFrames = capturedFrames;
                 statsFrames = 0;
-                displayFrames = 0;
-                displayMs = 0.0;
                 encodeMs = 0.0;
             }
         }
@@ -416,8 +412,22 @@ int run(const Options& options) {
     if (!capture.open(options.device, options.width, options.height, options.pixelFormat) ||
         !capture.start())
         return 1;
+    LcdProcess lcdProcess;
+    if (lcdActive && !lcdProcess.start(display, capture.width(), capture.height())) {
+        if (options.lcdRequired) {
+            capture.stop();
+            return 1;
+        }
+        std::cerr << "[LCD] Continuing with HTTP only; LCD process could not start\n";
+        display.close();
+        lcdActive = false;
+    }
     HttpServer server(options.snapshots);
-    if (!server.start(options.port)) return 1;
+    if (!server.start(options.port)) {
+        lcdProcess.stop();
+        capture.stop();
+        return 1;
+    }
 
     Touchscreen touch;
     bool touchActive = false;
@@ -429,6 +439,7 @@ int run(const Options& options) {
         } else if (options.touchRequired) {
             std::cerr << "[Touch] Required touchscreen could not be opened\n";
             server.stop();
+            lcdProcess.stop();
             capture.stop();
             return 1;
         } else {
@@ -436,6 +447,7 @@ int run(const Options& options) {
         }
     }
 
+    // Keep a small buffer to absorb short processing bursts without unbounded latency.
     BoundedQueue<Frame> raw(3);
     BoundedQueue<Frame> jpeg(3);
     PipelineState state;
@@ -445,7 +457,7 @@ int run(const Options& options) {
     try {
         captureThread = std::thread(captureLoop, std::ref(capture), std::ref(raw), std::ref(state));
         encodeThread = std::thread(encodeLoop, std::ref(raw), std::ref(jpeg),
-            std::ref(display), lcdActive, options.quality,
+            std::ref(lcdProcess), lcdActive, options.quality,
             options.pixelFormat == V4l2Capture::PixelFormat::MJPEG,
             options.lcdInterval, options.faceInterval, std::ref(faceWorker),
             faceActive, std::ref(state));
@@ -465,6 +477,7 @@ int run(const Options& options) {
     if (encodeThread.joinable()) encodeThread.join();
     if (touchThread.joinable()) touchThread.join();
     server.stop();
+    lcdProcess.stop();
     capture.stop();
     return state.failed ? 1 : 0;
 }

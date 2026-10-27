@@ -124,30 +124,72 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
     const int left = (screenWidth - width) / 2;
     const int top = (screenHeight - height) / 2;
 
-    // Clear only when geometry changes; row padding and nonvisible pages stay untouched.
-    if (sourceWidth_ != bgr.cols || sourceHeight_ != bgr.rows) {
-        for (int y = 0; y < screenHeight; ++y) {
-            uint8_t* row = memory_ +
-                (static_cast<size_t>(variable_.yoffset) + y) * fixed_.line_length +
-                static_cast<size_t>(variable_.xoffset) * bytes;
-            for (int x = 0; x < screenWidth; ++x) {
-                /* 刷成底色 */
-                std::memcpy(row + x * bytes, &alpha_, bytes);
-            }
-        }
+    const size_t maxRowBytes = static_cast<size_t>(screenWidth) * bytes;
+    if (packedRow_.size() < maxRowBytes)
+        packedRow_.resize(maxRowBytes);
+
+    const bool geometryChanged = sourceWidth_ != bgr.cols || sourceHeight_ != bgr.rows;
+    if (geometryChanged) {
+        initializedPages_ = 0;
         sourceWidth_ = bgr.cols;
         sourceHeight_ = bgr.rows;
+    }
+
+    // Clear each page once for the current geometry; row padding and nonvisible pages stay untouched.
+    if (geometryChanged || !(initializedPages_ & (1u << page_))) {
+        if (bytes == sizeof(uint16_t)) {
+            auto* row = reinterpret_cast<uint16_t*>(packedRow_.data());
+            std::fill(row, row + screenWidth, static_cast<uint16_t>(alpha_));
+        } else if (bytes == sizeof(uint32_t)) {
+            auto* row = reinterpret_cast<uint32_t*>(packedRow_.data());
+            std::fill(row, row + screenWidth, alpha_);
+        } else {
+            for (int x = 0; x < screenWidth; ++x) {
+                packedRow_[static_cast<size_t>(x) * bytes] =
+                    static_cast<uint8_t>(alpha_);
+                packedRow_[static_cast<size_t>(x) * bytes + 1] =
+                    static_cast<uint8_t>(alpha_ >> 8);
+                packedRow_[static_cast<size_t>(x) * bytes + 2] =
+                    static_cast<uint8_t>(alpha_ >> 16);
+            }
+        }
+        for (int y = 0; y < screenHeight; ++y) {
+            uint8_t* row = memory_ +
+                (static_cast<size_t>(variable_.yoffset) +
+                 static_cast<size_t>(page_) * variable_.yres + y) * fixed_.line_length +
+                static_cast<size_t>(variable_.xoffset) * bytes;
+            std::memcpy(row, packedRow_.data(), maxRowBytes);
+        }
+        initializedPages_ |= 1u << page_;
     }
     for (int y = 0; y < height; ++y) {
         const cv::Vec3b* source = scaled_.ptr<cv::Vec3b>(y);
         uint8_t* destination = memory_ +
-            (static_cast<size_t>(variable_.yoffset) + top + y) * fixed_.line_length +
+            (static_cast<size_t>(variable_.yoffset) +
+             static_cast<size_t>(page_) * variable_.yres + top + y) * fixed_.line_length +
             (static_cast<size_t>(variable_.xoffset) + left) * bytes;
-        for (int x = 0; x < width; ++x) {
-            const uint32_t pixel = alpha_ | redTable_[source[x][2]] |
-                                   greenTable_[source[x][1]] | blueTable_[source[x][0]];
-            std::memcpy(destination + x * bytes, &pixel, bytes);
+        const size_t rowBytes = static_cast<size_t>(width) * bytes;
+        if (bytes == sizeof(uint16_t)) {
+            auto* row = reinterpret_cast<uint16_t*>(packedRow_.data());
+            for (int x = 0; x < width; ++x) {
+                row[x] = static_cast<uint16_t>(packPixel(
+                    source[x][0], source[x][1], source[x][2]));
+            }
+        } else if (bytes == sizeof(uint32_t)) {
+            auto* row = reinterpret_cast<uint32_t*>(packedRow_.data());
+            for (int x = 0; x < width; ++x) {
+                row[x] = packPixel(source[x][0], source[x][1], source[x][2]);
+            }
+        } else {
+            for (int x = 0; x < width; ++x) {
+                const uint32_t pixel = packPixel(source[x][0], source[x][1], source[x][2]);
+                const size_t offset = static_cast<size_t>(x) * bytes;
+                packedRow_[offset] = static_cast<uint8_t>(pixel);
+                packedRow_[offset + 1] = static_cast<uint8_t>(pixel >> 8);
+                packedRow_[offset + 2] = static_cast<uint8_t>(pixel >> 16);
+            }
         }
+        std::memcpy(destination, packedRow_.data(), rowBytes);
     }
     drawPhotoButton();
     return true;
@@ -235,9 +277,18 @@ void FramebufferSurface::writePixel(int x, int y, uint32_t pixel) {
         return;
     const size_t bytes = variable_.bits_per_pixel / 8;
     uint8_t* destination = memory_ +
-        (static_cast<size_t>(variable_.yoffset) + y) * fixed_.line_length +
+        (static_cast<size_t>(variable_.yoffset) +
+         static_cast<size_t>(page_) * variable_.yres + y) * fixed_.line_length +
         (static_cast<size_t>(variable_.xoffset) + x) * bytes;
-    std::memcpy(destination, &pixel, bytes);
+    if (bytes == sizeof(uint16_t)) {
+        *reinterpret_cast<uint16_t*>(destination) = static_cast<uint16_t>(pixel);
+    } else if (bytes == sizeof(uint32_t)) {
+        *reinterpret_cast<uint32_t*>(destination) = pixel;
+    } else {
+        destination[0] = static_cast<uint8_t>(pixel);
+        destination[1] = static_cast<uint8_t>(pixel >> 8);
+        destination[2] = static_cast<uint8_t>(pixel >> 16);
+    }
 }
 
 /**
@@ -293,7 +344,7 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     fpsText << "FPS " << std::fixed << std::setprecision(1) << stats.fps;
 
     std::ostringstream lcdText;
-    lcdText << "LCD " << std::fixed << std::setprecision(1) << stats.lcdMs << "ms";
+    lcdText << "LCD " << std::fixed << std::setprecision(1) << stats.lcdFps << "fps";
 
     std::ostringstream jpegText;
     jpegText << "JPEG " << std::fixed << std::setprecision(1) << stats.jpegMs << "ms";
@@ -337,6 +388,22 @@ void FramebufferSurface::reset() {
     memory_ = nullptr;
     sourceWidth_ = sourceHeight_ = 0;
     scaled_.release();
+    packedRow_.clear();
+    pageCount_ = 1;
+    page_ = 0;
+    initializedPages_ = 0;
+}
+
+/**
+ * @brief  Select the framebuffer page used by subsequent drawing operations.
+ * @param  [in] page Zero-based page index in the configured virtual framebuffer.
+ * @retval true The page is available and selected.
+ * @retval false The surface is unconfigured or the page is outside the buffer.
+ */
+bool FramebufferSurface::setPage(uint32_t page) {
+    if (!memory_ || page >= pageCount_) return false;
+    page_ = page;
+    return true;
 }
 
 /**
@@ -374,8 +441,26 @@ bool FramebufferDisplay::open(const std::string& device) {
         close();
         return false;
     }
+    variable_ = variable;
+    baseYOffset_ = variable.yoffset;
+    const uint64_t twoPages = static_cast<uint64_t>(variable.yres) * 2;
+    const uint64_t pageBottom = static_cast<uint64_t>(variable.yoffset) + twoPages;
+    const uint64_t pageBytes = static_cast<uint64_t>(variable.xoffset + variable.xres) *
+                               (variable.bits_per_pixel / 8);
+    const uint64_t pageEnd = pageBottom > 0
+        ? (pageBottom - 1) * fixed.line_length + pageBytes : 0;
+    doubleBuffered_ = variable.yres > 0 &&
+                      static_cast<uint64_t>(variable.yoffset) + twoPages <=
+                          variable.yres_virtual &&
+                      pageEnd <= length_ && pageEnd <= fixed.smem_len;
+    surface_.pageCount_ = doubleBuffered_ ? 2 : 1;
+    surface_.setPage(0);
+    frontPage_ = 0;
+    backPage_ = doubleBuffered_ ? 1 : 0;
+    vsyncState_ = -1;
     std::cout << "[LCD] " << device << ' ' << variable.xres << 'x' << variable.yres
-              << ' ' << variable.bits_per_pixel << " bpp, stride=" << fixed.line_length << '\n';
+              << ' ' << variable.bits_per_pixel << " bpp, stride=" << fixed.line_length
+              << ", double-buffer=" << (doubleBuffered_ ? "yes" : "no") << '\n';
     const PhotoButton button = surface_.photoButton();
     std::cout << "[LCD] PHOTO button x=" << button.x << " y=" << button.y
               << " w=" << button.width << " h=" << button.height << '\n';
@@ -391,7 +476,45 @@ bool FramebufferDisplay::open(const std::string& device) {
  * @note   OpenCV rendering errors propagate to the caller.
  */
 bool FramebufferDisplay::render(const cv::Mat& bgr) {
-    return surface_.render(bgr);
+    if (!surface_.setPage(doubleBuffered_ ? backPage_ : frontPage_) || !surface_.render(bgr))
+        return false;
+    if (!doubleBuffered_) return true;
+    if (!presentPage(backPage_)) return false;
+    backPage_ = 1 - backPage_;
+    return true;
+}
+
+/**
+ * @brief  Present a rendered page through the framebuffer page-flip ioctl.
+ * @param  [in] page Zero-based page index to make visible.
+ * @retval true The page was presented, or single-buffer fallback was enabled.
+ * @retval false The display is unavailable or the page index is invalid.
+ */
+bool FramebufferDisplay::presentPage(uint32_t page) {
+    if (fd_ < 0 || !doubleBuffered_ || page > 1) return false;
+    if (vsyncState_ != 0) {
+        int argument = 0;
+        if (ioctl(fd_, FBIO_WAITFORVSYNC, &argument) == 0) {
+            vsyncState_ = 1;
+        } else if (errno == ENOTTY || errno == EINVAL || errno == ENOSYS) {
+            vsyncState_ = 0;
+        }
+    }
+    fb_var_screeninfo next = variable_;
+    next.yoffset = baseYOffset_ + page * variable_.yres;
+    if (ioctl(fd_, FBIOPAN_DISPLAY, &next) < 0) {
+        std::cerr << "[LCD] FBIOPAN_DISPLAY failed: " << std::strerror(errno)
+                  << ", fallback to single buffer\n";
+        doubleBuffered_ = false;
+        surface_.pageCount_ = 1;
+        surface_.setPage(frontPage_);
+        backPage_ = frontPage_;
+        return true;
+    }
+    variable_ = next;
+    frontPage_ = page;
+    surface_.setPage(page);
+    return true;
 }
 
 /**
@@ -436,6 +559,12 @@ void FramebufferDisplay::close() {
     length_ = 0;
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
+    variable_ = {};
+    baseYOffset_ = 0;
+    frontPage_ = 0;
+    backPage_ = 0;
+    doubleBuffered_ = false;
+    vsyncState_ = -1;
 }
 
 /**
