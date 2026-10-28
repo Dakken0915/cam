@@ -145,3 +145,15 @@
 &emsp;&emsp;调试与验证：启动日志新增 `double-buffer=yes/no`，先确认驱动是否提供两页条件；再观察是否出现 `FBIOPAN_DISPLAY failed` 回退日志。主机 `test_video` 继续验证单页模拟显存的行跨度、居中偏移和像素格式，ARM 交叉编译验证翻页代码可用；双页能力、VSYNC 行为、撕裂和 DMA 扫描性能必须在真实 LCD 上测试。
 
 &emsp;&emsp;性能观测与后续：对比双缓冲开关下的 `LCD`、`LCD_FPS`、CPU、画面撕裂和延迟。若双缓冲只减少撕裂而 `LCD` 不下降，说明主要耗时在缩放或显存写入；若需要进一步减少拷贝，应根据板端 BSP 文档评估硬件缩放或 DMA-BUF，而不是在应用层伪造 DMA 接口。
+
+## 2026-10-28：优化 i.MX6ULL LCDIF framebuffer 驱动
+
+&emsp;&emsp;方案变更：根据板端 Linux 4.9.88、`hxh_lcd`、LCDIF 配置和 DTS 时序，重构 `drv/lcd_drv.c`。驱动由单页显存改为两页 `dma_alloc_wc` 显存，新增 `fb_mmap`、`fb_pan_display` 和 `FBIO_WAITFORVSYNC`，使用 LCDIF `NEXT_BUF` 和帧完成/VSYNC IRQ 实现同步页翻转。原来的未检查设备树、时钟、GPIO、映射和 DMA 返回值，以及错误 `iounmap(mylcd_regs)` 和 DMA 显存泄漏一并修复。
+
+&emsp;&emsp;方案取舍：选择 fbdev 原生双缓冲和 LCDIF 内置扫描 DMA，是因为应用已经使用 `FBIOPAN_DISPLAY`，可以在不增加用户态协议的情况下隔离扫描页和后台绘制页。替代方案是应用层另起 dmaengine 通道或迁移 DRM/KMS；前者需要确认 DMA-BUF、cache sync、完成通知和缓冲区所有权，后者会扩大 Linux 4.9 BSP 和应用接口迁移范围，因此暂不采用。
+
+&emsp;&emsp;风险与线程安全：双页显存占用翻倍，低内存时 probe 失败；`yoffset` 必须按完整页面对齐，非法值返回 `-EINVAL`；有 IRQ 时页翻转最多等待 500 ms，超时返回 `-ETIMEDOUT`。驱动用自旋锁保护 `NEXT_BUF` 提交和当前页状态，用 completion 等待硬件事件；IRQ 缺失时异步回退，不能宣称完全无撕裂。模块卸载前必须停止用户态 framebuffer mmap 访问。
+
+&emsp;&emsp;调试定位：第一次模块构建使用系统 GCC 13，虽然目标架构为 ARM，但生成的 `dsb st` 指令与旧内核当前汇编模式不兼容；根据 BSP 的 Buildroot 工具链信息切换到 `gcc-linaro-6.2.1-2016.11` 后通过交叉编译。编译过程中还发现 `drv` 缺少内核模块 Makefile，补充 `drv/Makefile` 后才能由 4.9 内核的 `M=... modules` 规则构建；随后将该 BSP 工具链设为 Makefile 默认值，避免直接执行 `make` 时回退到系统 GCC 13。驱动代码本身已通过 SDK 内核模块编译，真实中断号和 LCDIF 页翻转仍需板端 `dmesg`、`fbset` 和应用日志确认。
+
+&emsp;&emsp;性能瓶颈与观测：`dma_alloc_wc` 只改善 CPU 到 framebuffer 的连续写入属性，不能替代 OpenCV 缩放、像素打包或 LCD 总线带宽。上板后固定曝光、分辨率和 `--lcd-interval`，比较双缓冲前后的 `LCD`、`LCD_FPS`、`CAP/FPS`、父子进程 CPU 和画面延迟；用 `fbset` 检查两页布局，用 `dmesg` 检查 LCDIF 总线错误，用 `top -H` 或 `/proc/<pid>/stat` 检查线程负载。只有在确认显存拷贝仍是主要耗时时，才继续评估 BSP 私有硬件缩放或 DMA-BUF。

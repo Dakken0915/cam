@@ -43,6 +43,7 @@ cam/
 ├── src/                      应用入口与模块实现
 │   └── touchscreen.cpp       Linux evdev 触摸读取
 ├── assets/                   Haar 人脸分类器 XML 模型
+├── drv/                      i.MX6ULL LCDIF framebuffer 驱动和构建说明
 ├── tests/                    独立 C++ 回归测试
 ├── build/                    本机编译产物（构建时生成）
 ├── build_arm/                ARM 编译产物（构建时生成）
@@ -67,7 +68,7 @@ cam/
 | [tests/face_analyzer_test.cpp](tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
 | [Makefile](Makefile)、[Makefile.arm](Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
 
-仓库包含用户态应用，不包含设备树、摄像头驱动、LCD 驱动或板级根文件系统。
+仓库包含用户态应用和一个可按 BSP 单独编译的 LCDIF framebuffer 驱动；设备树、摄像头驱动和板级根文件系统仍由 SDK 提供。
 
 ## 实现方式与收益
 
@@ -617,3 +618,29 @@ YUYV 保留原始像素但占用较高的 USB 和摄像头处理带宽；MJPEG �
 &emsp;&emsp;先停止应用并查看能力：`v4l2-ctl -d /dev/video1 --list-formats-ext`；再显式设置格式和帧率，使用 `--get-fmt-video --get-parm` 查看驱动回报；最后使用 `--stream-mmap --stream-count=300` 测量完整窗口。运行应用时对照启动日志、`[Stats] CAP/FPS/LCD`、`top -H` 和 `dmesg`；使用 `lsusb -t` 确认 USB 链路速率和 Host 状态，并用 `--list-ctrls` 检查曝光控制。
 
 &emsp;&emsp;所有对照必须固定格式、分辨率、曝光状态和 USB 连接。`driver selected: 30 FPS` 只是 ioctl 的参数回报，最终结论必须以连续采集和应用 `CAP` 为准。
+
+## LCD 驱动优化
+
+&emsp;&emsp;`drv/lcd_drv.c` 是针对本工程 i.MX6ULL LCDIF 的 fbdev 驱动。BSP 使用 Linux 4.9.88，内核已启用 `CONFIG_FB_MXS`、`CONFIG_FB_MXC`、`CONFIG_DMA_ENGINE`、`CONFIG_IMX_SDMA` 和 `CONFIG_MXS_DMA`；设备树通过 `display` phandle 提供 LCD 时序。当前板端 `fb0` 报告 RGB565、`line_length=2048`，实际有效模式由设备树和 `fbset` 决定。
+
+&emsp;&emsp;驱动现在分配两页连续的写合并显存，设置 `yres_virtual=2*yres`，通过 `dma_mmap_wc` 映射给用户态。应用在后台页完成行级批量绘制后，调用 `FBIO_WAITFORVSYNC` 和 `FBIOPAN_DISPLAY`；驱动把对应物理地址写入 LCDIF `NEXT_BUF`，有 LCDIF IRQ 时等待帧完成，无 IRQ 时降级为异步翻页。这样共享内存只负责传递 BGR 图像，不能被误当成 framebuffer 物理地址或 LCD 扫描 DMA 缓冲。
+
+&emsp;&emsp;LCDIF 自身已经是显示扫描的总线主设备，因此本次没有在用户态伪造 dmaengine 拷贝接口。内核配置中存在 DMA 引擎并不等于应用能直接提交一条安全的 framebuffer DMA 传输；若要继续使用 DMA 拷贝，必须确认 BSP 的 DMA-BUF、cache sync、完成通知和缓冲区所有权接口。当前优化优先减少单像素写入、隔离扫描页和绘制页，并保持 fbdev 兼容。
+
+&emsp;&emsp;驱动编译使用 BSP 配套 Linaro 工具链：
+
+```sh
+cd /home/hxh1987370733/workspace/cam/drv
+make
+```
+
+也可以显式调用内核模块构建命令：
+
+```sh
+make -C /home/hxh1987370733/toolchain/100ask_imx6ull-sdk/Linux-4.9.88 \
+  M=$PWD/drv ARCH=arm \
+  CROSS_COMPILE=/home/hxh1987370733/toolchain/100ask_imx6ull-sdk/ToolChain/gcc-linaro-6.2.1-2016.11-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf- \
+  modules
+```
+
+&emsp;&emsp;板端验收需要检查 `fbset -fb /dev/fb0 -i` 的 `yres_virtual` 和 `Size` 是否变为双页，检查 `dmesg` 是否显示 `with IRQ`，应用日志是否为 `double-buffer=yes`，并固定曝光、分辨率和显示间隔对比 `CAP/FPS/LCD_FPS/LCD`、CPU、撕裂和延迟。驱动模块已完成交叉编译验证，真实 LCD 的帧完成 IRQ、页翻转和可见帧率仍需上板测量。
