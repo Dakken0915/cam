@@ -1,4 +1,4 @@
-# Linux 本机构建与 HTTP 集成测试
+# Native Linux build and HTTP integration tests.
 .DEFAULT_GOAL := cam_server
 CXX      = g++
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -g

@@ -21,18 +21,14 @@
 
 namespace {
 
-/**
- * @brief  Throw a test failure when an assertion is false.
- */
+// Throw when an assertion is false.
 void require(bool condition, const std::string& message) {
     if (!condition) {
         throw std::runtime_error(message);
     }
 }
 
-/**
- * @brief  Connect to the local test server with a receive timeout.
- */
+// Connect to the local server with a receive timeout.
 int connectToServer(int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     require(fd >= 0, "socket() failed");
@@ -57,9 +53,7 @@ int connectToServer(int port) {
     throw std::runtime_error("connect() failed");
 }
 
-/**
- * @brief  Send an HTTP request and read its response or first test JPEG.
- */
+// Send an HTTP request and read its response.
 std::string request(int port, const std::string& method, const std::string& path,
                     bool stopAfterJpeg = false) {
     int fd = connectToServer(port);
@@ -85,9 +79,7 @@ std::string request(int port, const std::string& method, const std::string& path
     return response;
 }
 
-/**
- * @brief  Send a raw request line to test invalid or oversized HTTP requests.
- */
+// Send a raw request line for validation tests.
 std::string rawRequest(int port, const std::string& requestLine) {
     int fd = connectToServer(port);
     const std::string payload = requestLine + "\r\nHost: localhost\r\nConnection: close\r\n\r\n";
@@ -104,9 +96,7 @@ std::string rawRequest(int port, const std::string& requestLine) {
     return response;
 }
 
-/**
- * @brief  List regular files in the snapshot directory for storage assertions.
- */
+// List regular snapshot files.
 std::vector<std::string> regularFiles(const std::string& directory) {
     std::vector<std::string> result;
     DIR* dir = opendir(directory.c_str());
@@ -126,9 +116,7 @@ std::vector<std::string> regularFiles(const std::string& directory) {
 
 }  // namespace
 
-/**
- * @brief  Test HTTP routes, snapshots, quotas, request validation, and server lifecycle.
- */
+// Test routes, snapshots, quotas, validation, and lifecycle.
 int main() {
     char tempTemplate[] = "/tmp/cam-http-test-XXXXXX";
     char* tempDir = mkdtemp(tempTemplate);

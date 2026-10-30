@@ -43,7 +43,6 @@ cam/
 ├── src/                      应用入口与模块实现
 │   └── touchscreen.cpp       Linux evdev 触摸读取
 ├── assets/                   Haar 人脸分类器 XML 模型
-├── drv/                      i.MX6ULL LCDIF framebuffer 驱动和构建说明
 ├── tests/                    独立 C++ 回归测试
 ├── build/                    本机编译产物（构建时生成）
 ├── build_arm/                ARM 编译产物（构建时生成）
@@ -68,7 +67,7 @@ cam/
 | [tests/face_analyzer_test.cpp](tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
 | [Makefile](Makefile)、[Makefile.arm](Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
 
-仓库包含用户态应用和一个可按 BSP 单独编译的 LCDIF framebuffer 驱动；设备树、摄像头驱动和板级根文件系统仍由 SDK 提供。
+仓库包含用户态应用，不包含设备树、摄像头驱动、LCD 驱动或板级根文件系统。
 
 ## 实现方式与收益
 
@@ -169,7 +168,7 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
-目前不支持 UYVY、多平面采集、音频、录像、硬件编码或自动重连。YUYV 模式的 JPEG 使用 CPU 编码；MJPEG 模式可复用相机 JPEG，但 LCD/人脸处理仍使用 CPU 解码。LCD 在 framebuffer 提供两页虚拟显存并接受翻页 ioctl 时使用双缓冲，否则回退单页面写入，DMA 拷贝仍依赖具体 BSP 驱动接口。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
+目前不支持 UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。YUYV 模式的 JPEG 使用 CPU 编码；MJPEG 模式可复用相机 JPEG，但 LCD/人脸处理仍使用 CPU 解码。单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
 
 ### Haar 人脸检测与灰度图比对
 
@@ -424,6 +423,129 @@ LCD 与网络同时输出：
 
 ### 预期日志、画面与 HTTP 接口
 
+### 远程访问与主动上行
+
+&emsp;&emsp;当前 HTTP 服务在 `src/http_server.cpp` 中使用 `INADDR_ANY` 绑定 `0.0.0.0`，因此不是只能本地访问。板端启动后，在同一局域网的远程电脑或手机上访问板卡 IPv4 地址即可：
+
+```sh
+# 板端查看地址
+ip -4 addr
+
+# 远程设备访问
+curl -I http://BOARD_IP:8080/
+curl --max-time 10 -o stream.mjpeg http://BOARD_IP:8080/stream
+```
+
+&emsp;&emsp;浏览器地址为 `http://BOARD_IP:8080/`。如果远程端连接失败，依次检查板端 `ss -ltnp | grep 8080` 是否监听、板端防火墙是否放行 TCP 8080、两台设备是否路由可达，以及无线 AP 是否启用了客户端隔离。跨公网访问还需要 VPN、路由器端口转发或反向代理；直接暴露当前服务没有认证和 TLS，不适合裸露在公网。
+
+&emsp;&emsp;当前 HTTP 是远程端主动拉取 MJPEG，服务端不会主动连接某个远程地址。若需求是“板端主动推到远程服务器”，需要在采集流水线后增加 RTSP、RTMP、SRT 或 WebRTC 上行客户端；这与现有浏览器 `/stream` 是两条不同的数据路径。最小改造可以增加 FFmpeg/媒体库输出线程，但要重新评估 i.MX6ULL 的编码、网络带宽、断线重连和鉴权开销。
+
+&emsp;&emsp;把画面传到同一局域网电脑的直接操作如下。先在板端查看 IP 并启动服务：
+
+```sh
+ip -4 addr
+cd /opt/cam/dist_arm
+./cam_server_arm --device /dev/video1 --format mjpeg --no-lcd --no-touch \
+  --port 8080 --face-interval 30
+```
+
+&emsp;&emsp;假设板端地址是 `192.168.1.100`，电脑浏览器打开 `http://192.168.1.100:8080/`；也可以直接播放 MJPEG 地址：
+
+```sh
+# ffplay
+ffplay -f mjpeg http://192.168.1.100:8080/stream
+
+# VLC
+vlc http://192.168.1.100:8080/stream
+```
+
+&emsp;&emsp;电脑先执行 `ping 192.168.1.100`，再执行 `curl -I http://192.168.1.100:8080/` 验证网络和 HTTP。若板端监听正常但电脑连接失败，检查板端防火墙是否放行 TCP 8080，以及无线网络是否启用了客户端隔离。这个流程是电脑主动拉流；若要求板端主动向电脑发起连接，则需要电脑运行 RTSP/RTMP/SRT 接收端，并为程序增加对应的上行协议输出。
+
+&emsp;&emsp;没有网线时，电脑和板端仍需通过 Wi-Fi 或 USB 网络建立链路。最容易验证的是让电脑开启热点，板端使用 USB Wi-Fi 网卡连接：
+
+```sh
+# 板端确认无线接口名称
+ip link
+
+# 按板端 Buildroot 是否提供这些命令执行
+wpa_passphrase "CAM-PC" "热点密码" >/etc/wpa_supplicant.conf
+wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant.conf
+udhcpc -i wlan0
+ip -4 addr show wlan0
+```
+
+&emsp;&emsp;板端拿到热点分配的地址后，电脑访问 `http://板端无线IP:8080/`。如果板端没有 Wi-Fi 硬件或驱动，可以使用 USB OTG Gadget Ethernet；内核需要启用 `CONFIG_USB_ETH` 或 ConfigFS ECM/RNDIS，板端出现 `usb0` 后配置静态地址，例如板端 `192.168.7.1/24`、电脑 `192.168.7.2/24`，再访问 `http://192.168.7.1:8080/`。具体 Gadget 初始化命令取决于 BSP 的 USB OTG 配置。
+
+&emsp;&emsp;只有 UART 串口时可以建立 PPP，但串口带宽和稳定性通常不足以承载实时 MJPEG；它更适合调试、传日志或低帧率截图。没有 Wi-Fi、USB 网络或其他网络链路时，HTTP 无法把视频传到电脑，必须先补充一种网络连接。
+
+&emsp;&emsp;如果电脑可以 SSH 登录板端，可以用本地端口转发把板端 HTTP 映射到电脑：
+
+```sh
+# 在电脑执行，电脑本地 18080 -> 板端 127.0.0.1:8080
+ssh -N -L 18080:127.0.0.1:8080 root@BOARD_IP
+```
+
+&emsp;&emsp;保持 SSH 命令运行，在电脑浏览器访问 `http://127.0.0.1:18080/`，或用 `ffplay -f mjpeg http://127.0.0.1:18080/stream`。这里的 `18080` 可以替换成电脑上未占用的端口；板端程序仍监听原来的 `8080`。端口转发只改变访问入口，不会把没有网络链路的串口自动变成 TCP；若只有 USB 串口，应先配置 USB Gadget Ethernet 或 PPP。
+
+&emsp;&emsp;如果设备提供 ADB，这是只有 USB 和终端串口时最直接的方案。先通过串口在板端启动摄像头服务：
+
+```sh
+cd /opt/cam/dist_arm
+./cam_server_arm --device /dev/video1 --format mjpeg \
+  --no-lcd --no-touch --port 8080
+```
+
+&emsp;&emsp;再在电脑执行 ADB 转发：
+
+```sh
+adb devices
+adb forward tcp:18080 tcp:8080
+adb forward --list
+```
+
+&emsp;&emsp;电脑浏览器访问 `http://127.0.0.1:18080/`，或使用 `ffplay -f mjpeg http://127.0.0.1:18080/stream`。取消映射执行 `adb forward --remove tcp:18080`。`18080` 是电脑端口，`8080` 是板端 HTTP 端口；如果电脑端口被占用，换一个本地端口即可。终端串口只负责登录和查看日志，ADB 才负责把 TCP 端口通过 USB 转发。
+
+&emsp;&emsp;如果 `adb forward` 在 WSL 中执行，先在 WSL 验证：
+
+```sh
+curl -I http://127.0.0.1:18080/
+```
+
+&emsp;&emsp;电脑主机优先使用 Windows 侧的 `adb.exe` 执行转发，这样浏览器直接访问 Windows 本地端口：
+
+```powershell
+adb.exe devices
+adb.exe forward tcp:18080 tcp:8080
+curl.exe -I http://127.0.0.1:18080/
+```
+
+&emsp;&emsp;如果只能使用 WSL 内的 ADB，按下面的固定链路把端口转给 Windows 主机。ADB 将板端 `8080` 转到 WSL 的 `18080`，`socat` 再把 WSL 的 `18081` 暴露到所有接口：
+
+```sh
+adb forward --remove-all
+pkill socat
+adb forward tcp:18080 tcp:8080
+socat TCP-LISTEN:18081,fork,bind=0.0.0.0 TCP:127.0.0.1:18080 &
+hostname -I
+```
+
+&emsp;&emsp;记录 `hostname -I` 输出的第一个 WSL 地址，例如 `172.27.80.1`。然后在 Windows PowerShell 或浏览器中访问 WSL 的 `18081`：
+
+```powershell
+$wslIp = "172.27.80.1"   # 替换为 WSL hostname -I 的第一个地址
+curl.exe -I "http://$wslIp`:18081/"
+Start-Process "http://$wslIp`:18081/"
+```
+
+&emsp;&emsp;也可以直接在 Windows PowerShell 中获取地址并访问：
+
+```powershell
+$wslIp = (wsl hostname -I).Trim().Split(' ')[0]
+Start-Process "http://$wslIp`:18081/"
+```
+
+&emsp;&emsp;WSL 重启后地址可能变化；`socat` 未安装时在 WSL 安装对应包，或改用 Windows `adb.exe`。`pkill socat` 会停止当前 WSL 中的 socat 进程，确认没有其他 socat 任务后再执行。
+
 成功启动日志示例，实际设备名称和位深可能不同。`CAP` 表示应用从 V4L2 收到帧的速率，`FPS` 表示完成 LCD/JPEG 处理的速率：
 
 ```text
@@ -521,9 +643,21 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 
 ## 优化方法与原理
 
+## 数据流与共享变量
+
+&emsp;&emsp;摄像头使用 V4L2 MMAP 缓冲区采集。`V4l2Capture::getFrame()` 从驱动缓冲区取出一帧后，通过 `memcpy` 复制到调用方的 `std::vector<uint8_t>& out`；在 `captureLoop()` 中，这个输出被放入 `Frame frame.data`，同时写入 `sequence`、`width`、`height`、`bytes_per_line` 和 `timestamp_us`。采集线程把 `Frame` 移动到容量为 3 的 `BoundedQueue<Frame> raw`，队列满时丢弃最旧帧。
+
+&emsp;&emsp;`encodeLoop()` 从 `raw` 取出局部变量 `Frame frame`。YUYV 模式下，`frame.data` 仍是原始 YUYV；`JpegEncoder::convertToBgr()` 将它转换为编码器内部复用的 `cv::Mat bgr_`，局部指针 `const cv::Mat* bgr` 指向这张 BGR 图。LCD 通过 `display.render(*bgr)` 使用该 BGR 图，HTTP 输出则通过 `encoder.encodeBgr(*bgr, quality)` 生成新的 JPEG `std::vector<uint8_t>`，再写入 `Frame encoded.data`。因此 YUYV 模式中 LCD 和 HTTP 来源于同一帧、同一张 BGR 处理图，但两者不是同一个内存对象。
+
+&emsp;&emsp;MJPEG 模式下，`frame.data` 已经是摄像头生成的 JPEG。处理线程只有在 `renderFrame` 或 `analyzeFrame` 为真时，才调用 `cv::imdecode(frame.data, cv::IMREAD_COLOR)` 得到局部 `cv::Mat decoded`，LCD使用这张解码后的 BGR 图；HTTP 路径直接执行 `encoded.data = std::move(frame.data)`，不再进行软件 JPEG 编码。此时 HTTP 得到的是摄像头压缩数据的移动结果，LCD 得到的是同一帧的解码结果，仍然不是同一块内存。`--lcd-interval` 只控制 MJPEG 的 LCD 解码和刷新频率，网页仍可发布每个处理到的 JPEG。
+
+&emsp;&emsp;编码线程把 `Frame encoded` 移动到容量为 3 的 `BoundedQueue<Frame> jpeg`。主线程取出 `encoded` 后调用 `HttpServer::updateFrame(encoded.data)`；该函数在 `frameMutex_` 保护下把数据复制到 `HttpServer::latestFrame_` 并递增 `frameSequence_`。HTTP `/stream` 从 `latestFrame_` 复制后发送 multipart MJPEG，`/snapshot` 和 LCD 触摸拍照也从同一个 `latestFrame_` 复制并保存。因此 HTTP 网页流、HTTP 截图和触摸截图使用同一份“最新 JPEG 快照”数据，但它们与 LCD 显存中的像素不是同一份数据。
+
+&emsp;&emsp;LCD 还会在 framebuffer 上叠加快门按钮和统计文字，这些内容只写入 `FramebufferDisplay` 的显存，不会回写 `frame.data`、`encoded.data` 或 `latestFrame_`，所以网页和照片中不会出现 LCD 按钮。由于有界队列会丢弃旧帧、LCD 可能按间隔刷新、HTTP 客户端只取最新序号，LCD 画面和网页画面可能存在时间差，也不保证每次显示的是同一个序号。
+
 ### 视频流水线解耦
 
-采集、图像处理、LCD 刷新、JPEG 编码和 HTTP 发送通过有界队列分开。实时采集队列和 HTTP 输出队列容量设为 3，满载时丢弃最旧帧，可以吸收短时处理抖动并避免内存无限增长。采集 30 FPS 而处理约 18~20 FPS 时，队列可能积累最多约 3 帧，延迟与丢帧率需要按场景取舍。
+采集、图像处理、LCD 刷新、JPEG 编码和 HTTP 发送通过有界队列分开。队列容量固定为 3，满载时丢弃最旧帧，让延迟保持在可控范围内；HTTP 客户端只读取最新 JPEG，慢客户端不会阻塞摄像头。代价是高负载时会丢帧，不能把队列无限增大来换取表面上的完整帧数。
 
 ### 低分辨率 Haar 检测
 
@@ -535,9 +669,7 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 
 ### 多进程方案的适用边界
 
-当前实现由 LCD 子进程负责显示，父进程通过三槽共享内存传递 BGR 帧；一张 640x480 BGR 帧约 900 KiB，因此槽位数量固定并在满载时丢弃旧帧。计数型 POSIX 信号量只负责唤醒 LCD 子进程，进程共享 pthread 互斥锁负责槽位状态和统计数据。在只有少量 CPU 核心的 i.MX6ULL 上，多进程不增加总算力，收益主要是把 framebuffer 刷新阻塞从采集/HTTP 主流程移开。
-
-本项目使用 `mmap(..., MAP_SHARED | MAP_ANONYMOUS, ...)` 创建匿名共享内存。匿名映射没有 `/dev/shm` 名称，父进程在 `fork()` 后把同一映射交给 LCD 子进程，停止时直接 `munmap()`，适合进程关系固定且生命周期由父进程管理的场景。命名共享内存通常使用 POSIX `shm_open()`，适合无亲缘进程按名称连接，但需要额外处理权限、名称冲突、异常退出后的残留对象、版本校验和 `shm_unlink()` 清理。两者的主要取舍是发现方式、生命周期和管理复杂度，不能简单认为匿名共享内存一定更快。
+当前实现使用线程共享内存，抽样帧只需一次受控复制。若改成多进程，需要通过共享内存、管道或 Unix socket 传递图像；一张 640x480 BGR 帧约 900 KiB，频繁复制和序列化会增加内存带宽及同步开销。在只有少量 CPU 核心的 i.MX6ULL 上，多进程不一定比当前异步线程更快，只有当检测库或驱动需要独立地址空间、且能使用独立 CPU 核心时才值得评估。
 
 ### 参数调优顺序
 
@@ -561,86 +693,6 @@ HTTP 测试此前因当前环境禁止 socket 而无法运行，本次仅重新�
 
 本次板端 320x240、关闭 LCD、JPEG 质量 50 的实测结果为 `CAP/FPS` 约 10 FPS，JPEG 编码约 18.5~19.0ms。与 640x480 时约 10 FPS 的采集结果相比，降低分辨率主要减少了处理耗时，没有提高当前摄像头实际输出帧率；因此后续需要区分摄像头/驱动帧率限制与应用处理优化。
 
-### Framebuffer 行级批量写入
-
-当前 LCD 渲染先由 OpenCV 完成缩放，再将每个 BGR 像素转换为 framebuffer 像素。旧实现对每个像素分别计算显存地址并调用 `memcpy`，在 1280x640 或 16 位 RGB565 模式下会产生大量小写操作，CPU 可能表现为仍有空闲但显示线程实际在等待内存写入完成。
-
-现在使用可复用的行缓冲：每行先在普通内存中完成 RGB565、24 位或 32 位像素打包，再使用一次 `memcpy` 写入显存；首次清屏也预先生成一行底色后逐行复制。照片按钮和统计面板仍通过统一像素接口绘制，但 16/32 位格式已经改为直接写入目标类型。该方案保留显存行跨度、x/y 偏移和通用位域表，不改变画面比例和颜色映射。
-
-行缓冲适合当前 framebuffer 接口，因为显存通常是设备映射内存，逐像素小写的调用和地址计算成本高；把连续写入聚合成整行可以减少函数调用、地址计算和总线事务。当前程序进一步检查 `yres_virtual` 和显存长度，在驱动提供两页虚拟显存时使用后台页渲染，并通过 `FBIO_WAITFORVSYNC`（驱动支持时）和 `FBIOPAN_DISPLAY` 完成同步翻页；不满足条件时自动回退单缓冲。
-
-DMA 不能通过通用用户态 framebuffer API 直接创建。LCD 控制器通常由内核驱动使用 DMA 从 framebuffer 显存扫描输出，应用层能控制的是写入布局、页翻转和同步时机。若要让 DMA 参与图像拷贝，需要 BSP 提供 dmaengine、DMA-BUF 或专用 ioctl，并处理缓冲区所有权、缓存一致性和完成通知；当前工程不绑定某一个 i.MX6ULL BSP 的私有接口。
-
-数据一致性需要区分共享内存和 CPU cache：`MAP_SHARED` 只表示多个进程映射同一物理内存，不等于没有 cache。父进程完成共享槽位写入后，通过进程共享互斥锁和 `sem_post()` 发布；LCD 子进程通过 `sem_wait()` 和同一把互斥锁建立可见性。framebuffer 的缓存属性由驱动决定，若 BSP 使用非一致性 DMA，则必须遵循驱动提供的 cache clean、DMA fence 或同步 ioctl，不能在应用层假设一次 `memcpy` 就完成了设备可见性。
-
-行缓冲的源数据通常位于普通 cacheable 内存，CPU 可以直接从 cache 读取刚打包的像素；`memcpy` 的目标是 `/dev/fb0` 通过 `mmap` 得到的虚拟地址，实际页属性由 framebuffer 驱动设置，可能是 Device、uncached 或 write-combine，而不是普通物理地址指针。当前应用依赖驱动的映射属性和 `FBIOPAN_DISPLAY` 顺序保证显示控制器看到完整后台页；若 BSP 使用 Normal cacheable 映射或非一致性 DMA，必须使用驱动提供的 cache clean、DMA-BUF sync 或专用 ioctl，不能把 `msync()` 当成通用解决方案。
-
-行缓冲只保存当前目标行，避免为非全屏画面的黑边额外分配一整片软件目标缓冲；硬件双缓冲的两页完整显存仍然保留，用于隔离 LCD 扫描页和 CPU 写入页。典型顺序是“BGR 缓存内存 -> 行缓冲格式转换 -> 后台 framebuffer 页 -> VSYNC/页翻转 -> LCD 控制器 DMA 扫描前台页”。若使用 BSP 专用 DMA 拷贝，还要在提交前 clean 源 cache、等待 DMA 完成 fence 后才能翻页，逐行 DMA 的启动开销也需要实测评估。
-
-当前实现中，三槽匿名共享内存保存的是完整 BGR 帧，不是行缓冲。父进程发布时按图像行跨度把整帧复制到共享槽；LCD 子进程在启动时继承同一映射，后续不重新执行 `mmap`，也不会把共享槽直接当成 framebuffer 物理地址。子进程再把共享槽包装成 `cv::Mat`，在 framebuffer 渲染阶段使用独立的 `packedRow_`，按输出画面行转换并写入 `/dev/fb0` 的虚拟映射区域。每帧只写有效图像矩形，双缓冲时整帧完成后通过 `FBIOPAN_DISPLAY` 一次切换整个页面。
-
-优化后应在板端固定摄像头格式、分辨率和曝光，比较 `LCD` 单次耗时、`LCD_FPS`、`CAP/FPS`、父子进程 CPU 和画面延迟。双缓冲开启时启动日志会显示 `double-buffer=yes`；若 `LCD` 仍接近 100ms，说明剩余瓶颈可能在 OpenCV 缩放、显存映射属性或显示控制器等待。主机测试只能验证像素结果和边界，不能证明真实显存总线性能；DMA 效果必须结合具体 BSP 驱动实测。
-
 ### 摄像头格式选择
 
 YUYV 保留原始像素但占用较高的 USB 和摄像头处理带宽；MJPEG 由摄像头先压缩，通常可以降低传输带宽，并可直接复用到 HTTP 和照片保存路径。格式表中的 30 FPS 只能作为能力声明，实际吞吐必须用完整采集窗口测量。板端 `--lcd-interval 2` 曾处理约 13~22 FPS，改为 `--lcd-interval 3` 后稳定阶段达到约 26~29 FPS；LCD 刷新约为处理频率的三分之一，单次刷新仍需 59~82ms。MJPEG 仍需要解码才能显示到 framebuffer，不能保证 LCD 同样达到摄像头输出帧率。
-
-### 常见问题与回答
-
-#### 为什么普通光下约 10 FPS，强光下可以达到 30 FPS
-
-&emsp;&emsp;主要原因是摄像头自动曝光。普通光照下，摄像头会延长曝光时间以保持画面亮度，单帧采集周期变长后实际帧率可能降到约 10 FPS；强光下曝光时间缩短，摄像头恢复到请求的 30 FPS。程序通过 V4L2 请求 30 FPS，但请求值不代表所有曝光条件下都能稳定输出 30 FPS。
-
-&emsp;&emsp;排查时停止应用，固定格式、分辨率和请求帧率，用 `v4l2-ctl --stream-mmap --stream-count=300` 分别测量普通光和强光；同时观察程序的 `CAP`。若 `CAP` 随照度从 30 降到 10，问题发生在摄像头或驱动采集侧；若 `CAP` 稳定而处理 `FPS` 下降，才回到应用处理路径分析。项目通过 `V4L2_CID_EXPOSURE_AUTO_PRIORITY` 提供帧率优先或亮度优先选择。
-
-#### 为什么选择多进程加共享内存
-
-&emsp;&emsp;原先采集线程同时负责图像处理、LCD 缩放、像素转换和 framebuffer 写入，LCD 刷新耗时会阻塞视频处理。现在父进程负责采集、图像处理、HTTP 和人脸检测，LCD 子进程独立完成显示，通过共享内存传递 BGR 帧。共享内存适合传递大图像，可以减少管道或 Unix Socket 的序列化和额外复制，并且能够固定内存上限。
-
-&emsp;&emsp;多进程不会增加 i.MX6ULL 单核的总算力，收益是隔离 LCD 阻塞。板端实测捕获约 30 FPS 时，主处理 `FPS` 约 17~21，LCD 单次绘制约 92~110ms，对应实际显示约 9~11 次/秒，父子两个进程 CPU 占用合计约 50%。
-
-#### 如何区分摄像头、图像处理和 LCD 瓶颈
-
-&emsp;&emsp;`CAP` 表示采集线程从 V4L2 成功获取帧的速率，`FPS` 表示图像处理完成并进入 HTTP 输出队列的速率，`LCD_FPS` 表示 LCD 子进程实际完成的显示帧率，`LCD` 表示一次 LCD 绘制的平均耗时。`CAP` 和 `FPS` 都约 10 说明采集侧受限；`CAP` 约 30 而 `FPS` 约 10~20 说明图像处理、JPEG、解码或人脸分析跟不上；`LCD` 约 100ms 时，`LCD_FPS` 通常约 9~11，不能把处理 `FPS` 直接当作 LCD 刷新率。
-
-&emsp;&emsp;通过 `--no-lcd`、降低分辨率、降低人脸检测频率和切换 MJPEG/YUYV 逐项对照，避免把应用处理瓶颈误判为摄像头输出上限。
-
-#### 共享内存如何避免读写冲突
-
-&emsp;&emsp;共享内存使用三个槽位，状态按 `FREE -> WRITING -> READY -> READING -> FREE` 流转。父进程取得空闲槽后写入 BGR 帧和序号，再标记为 `READY`；LCD 子进程只消费最新的 `READY` 槽，完成显示后释放槽位。没有空闲槽时丢弃旧的 `READY` 帧，避免延迟积累。
-
-&emsp;&emsp;LCD 通知使用进程共享的计数型 POSIX 信号量 `sem_t readyFrames`：父进程完成 `WRITING -> READY` 后调用 `sem_post()`，LCD 子进程阻塞在 `sem_wait()`，醒来后在共享互斥锁保护下重新扫描并占用最新 `READY` 槽。信号量只负责唤醒，不替代槽位状态锁；旧 READY 帧可能被丢弃，因此一次通知不保证一定存在可读槽。停止时父进程设置停止标志并 `sem_post()`，唤醒等待中的子进程完成退出。
-
-&emsp;&emsp;控制块使用 `PTHREAD_PROCESS_SHARED` 的 pthread 互斥锁保护共享槽位，计数型信号量负责新帧通知。LCD 子进程在其他应用线程创建前通过 `fork` 启动，避免继承处于锁定状态的 C++ 或 OpenCV 线程资源。
-
-#### 如何使用工具定位实际帧率
-
-&emsp;&emsp;先停止应用并查看能力：`v4l2-ctl -d /dev/video1 --list-formats-ext`；再显式设置格式和帧率，使用 `--get-fmt-video --get-parm` 查看驱动回报；最后使用 `--stream-mmap --stream-count=300` 测量完整窗口。运行应用时对照启动日志、`[Stats] CAP/FPS/LCD`、`top -H` 和 `dmesg`；使用 `lsusb -t` 确认 USB 链路速率和 Host 状态，并用 `--list-ctrls` 检查曝光控制。
-
-&emsp;&emsp;所有对照必须固定格式、分辨率、曝光状态和 USB 连接。`driver selected: 30 FPS` 只是 ioctl 的参数回报，最终结论必须以连续采集和应用 `CAP` 为准。
-
-## LCD 驱动优化
-
-&emsp;&emsp;`drv/lcd_drv.c` 是针对本工程 i.MX6ULL LCDIF 的 fbdev 驱动。BSP 使用 Linux 4.9.88，内核已启用 `CONFIG_FB_MXS`、`CONFIG_FB_MXC`、`CONFIG_DMA_ENGINE`、`CONFIG_IMX_SDMA` 和 `CONFIG_MXS_DMA`；设备树通过 `display` phandle 提供 LCD 时序。当前板端 `fb0` 报告 RGB565、`line_length=2048`，实际有效模式由设备树和 `fbset` 决定。
-
-&emsp;&emsp;驱动现在分配两页连续的写合并显存，设置 `yres_virtual=2*yres`，通过 `dma_mmap_wc` 映射给用户态。应用在后台页完成行级批量绘制后，调用 `FBIO_WAITFORVSYNC` 和 `FBIOPAN_DISPLAY`；驱动把对应物理地址写入 LCDIF `NEXT_BUF`，有 LCDIF IRQ 时等待帧完成，无 IRQ 时降级为异步翻页。这样共享内存只负责传递 BGR 图像，不能被误当成 framebuffer 物理地址或 LCD 扫描 DMA 缓冲。
-
-&emsp;&emsp;LCDIF 自身已经是显示扫描的总线主设备，因此本次没有在用户态伪造 dmaengine 拷贝接口。内核配置中存在 DMA 引擎并不等于应用能直接提交一条安全的 framebuffer DMA 传输；若要继续使用 DMA 拷贝，必须确认 BSP 的 DMA-BUF、cache sync、完成通知和缓冲区所有权接口。当前优化优先减少单像素写入、隔离扫描页和绘制页，并保持 fbdev 兼容。
-
-&emsp;&emsp;驱动编译使用 BSP 配套 Linaro 工具链：
-
-```sh
-cd /home/hxh1987370733/workspace/cam/drv
-make
-```
-
-也可以显式调用内核模块构建命令：
-
-```sh
-make -C /home/hxh1987370733/toolchain/100ask_imx6ull-sdk/Linux-4.9.88 \
-  M=$PWD/drv ARCH=arm \
-  CROSS_COMPILE=/home/hxh1987370733/toolchain/100ask_imx6ull-sdk/ToolChain/gcc-linaro-6.2.1-2016.11-x86_64_arm-linux-gnueabihf/bin/arm-linux-gnueabihf- \
-  modules
-```
-
-&emsp;&emsp;板端验收需要检查 `fbset -fb /dev/fb0 -i` 的 `yres_virtual` 和 `Size` 是否变为双页，检查 `dmesg` 是否显示 `with IRQ`，应用日志是否为 `double-buffer=yes`，并固定曝光、分辨率和显示间隔对比 `CAP/FPS/LCD_FPS/LCD`、CPU、撕裂和延迟。驱动模块已完成交叉编译验证，真实 LCD 的帧完成 IRQ、页翻转和可见帧率仍需上板测量。

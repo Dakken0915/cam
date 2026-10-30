@@ -15,24 +15,13 @@
 
 namespace {
 
-/**
- * @brief  Test one bit in an evdev capability bitmap.
- * @param  [in] bitmap Capability bitmap storage.
- * @param  [in] bit Event code to test.
- * @retval true The capability bit is set.
- * @retval false The capability bit is clear.
- */
+// Test one bit in an evdev capability bitmap.
 bool hasBit(const unsigned long* bitmap, int bit) {
     return (bitmap[static_cast<size_t>(bit) / (sizeof(unsigned long) * 8)] >>
             (bit % (sizeof(unsigned long) * 8))) & 1UL;
 }
 
-/**
- * @brief  Check whether an evdev path names an event device candidate.
- * @param  [in] name Directory entry name.
- * @retval true The name has the eventN form.
- * @retval false The name is unrelated to evdev event devices.
- */
+// Check whether a directory entry has the eventN form.
 bool isEventName(const char* name) {
     if (std::strncmp(name, "event", 5) != 0 || name[5] == '\0') return false;
     for (const char* cursor = name + 5; *cursor; ++cursor) {
@@ -43,19 +32,10 @@ bool isEventName(const char* name) {
 
 } // namespace
 
-/**
- * @brief  Close the touchscreen event device on destruction.
- */
 Touchscreen::~Touchscreen() {
     close();
 }
 
-/**
- * @brief  Open an explicit touchscreen path or scan /dev/input/event* candidates.
- * @param  [in] device Explicit event path; empty enables candidate scanning.
- * @retval true A compatible touchscreen is open.
- * @retval false No compatible event device could be opened.
- */
 bool Touchscreen::open(const std::string& device) {
     close();
     if (!device.empty()) {
@@ -79,12 +59,6 @@ bool Touchscreen::open(const std::string& device) {
     return false;
 }
 
-/**
- * @brief  Open and validate one event device candidate.
- * @param  [in] path Candidate event device path.
- * @retval true The device exposes touch keys or tracking IDs and absolute X/Y axes.
- * @retval false The device is unavailable or lacks the required capabilities.
- */
 bool Touchscreen::openCandidate(const std::string& path) {
     const int descriptor = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (descriptor < 0) return false;
@@ -135,24 +109,11 @@ bool Touchscreen::openCandidate(const std::string& path) {
     return true;
 }
 
-/**
- * @brief  Set the display dimensions used to normalize raw touch coordinates.
- * @param  [in] width Display width in pixels.
- * @param  [in] height Display height in pixels.
- */
 void Touchscreen::setScreenSize(int width, int height) {
     screenWidth_ = std::max(1, width);
     screenHeight_ = std::max(1, height);
 }
 
-/**
- * @brief  Normalize one raw absolute coordinate to the display range.
- * @param  [in] value Raw input coordinate.
- * @param  [in] minimum Raw axis minimum.
- * @param  [in] maximum Raw axis maximum.
- * @param  [in] displaySize Display dimension in pixels.
- * @retval int Clamped display coordinate.
- */
 int Touchscreen::normalize(int value, int minimum, int maximum, int displaySize) {
     if (maximum <= minimum || displaySize <= 1) return 0;
     const int64_t clamped = std::max<int64_t>(minimum, std::min<int64_t>(maximum, value));
@@ -160,13 +121,6 @@ int Touchscreen::normalize(int value, int minimum, int maximum, int displaySize)
                             (maximum - minimum));
 }
 
-/**
- * @brief  Poll evdev events until a touch release is available.
- * @param  [out] point Normalized release coordinate.
- * @param  [in] timeoutMs Poll timeout in milliseconds.
- * @retval true A touch release was decoded.
- * @retval false The device timed out, closed, or produced an invalid event.
- */
 bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
     if (fd_ < 0 || timeoutMs < 0) return false;
     pollfd descriptor{fd_, POLLIN, 0};
@@ -230,9 +184,6 @@ bool Touchscreen::waitForTap(TouchPoint& point, int timeoutMs) {
     return false;
 }
 
-/**
- * @brief  Close the evdev descriptor and reset the touch state.
- */
 void Touchscreen::close() {
     if (fd_ >= 0) ::close(fd_);
     fd_ = -1;
@@ -242,11 +193,6 @@ void Touchscreen::close() {
     yAxisAdjusted_ = false;
 }
 
-/**
- * @brief  Report whether a touchscreen descriptor is open.
- * @retval true The reader owns an open event descriptor.
- * @retval false No event descriptor is open.
- */
 bool Touchscreen::isOpen() const {
     return fd_ >= 0;
 }

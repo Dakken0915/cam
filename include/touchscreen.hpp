@@ -11,13 +11,9 @@ struct TouchPoint {
 
 class Touchscreen {
 public:
-    /**
-     * @brief  Create an unopened evdev touchscreen reader.
-     */
+    // Create an unopened touchscreen reader.
     Touchscreen() = default;
-    /**
-     * @brief  Close the input device and release its descriptor.
-     */
+    // Close the input device on destruction.
     ~Touchscreen();
     Touchscreen(const Touchscreen&) = delete;
     Touchscreen& operator=(const Touchscreen&) = delete;
@@ -45,16 +41,9 @@ public:
      * @note   A tap is reported only when its release point is inside the input range.
      */
     bool waitForTap(TouchPoint& point, int timeoutMs = 250);
-    /**
-     * @brief  Close the touchscreen event device.
-     * @note   Safe to call repeatedly.
-     */
+    // Close the touchscreen event device.
     void close();
-    /**
-     * @brief  Report whether an evdev device is open.
-     * @retval true The reader owns a valid descriptor.
-     * @retval false No descriptor is open.
-     */
+    // Report whether a device is open.
     bool isOpen() const;
 
 private:

@@ -14,15 +14,7 @@
 
 namespace {
 
-/**
- * @brief  Validate a framebuffer channel and calculate its bit mask.
- * @param  [in] field Channel bitfield.
- * @param  [in] bits Total bits per pixel.
- * @param  [in] required Whether the channel must have a nonzero length.
- * @param  [out] mask Bit mask for a valid channel; zero for an absent optional channel.
- * @retval true The channel fits and uses a supported bit order.
- * @retval false The channel is missing, reversed, too wide, or out of range.
- */
+// Validate a framebuffer channel and calculate its bit mask.
 bool channelMask(const fb_bitfield& field, uint32_t bits, bool required,
                  uint32_t& mask) {
     mask = 0;
@@ -33,12 +25,7 @@ bool channelMask(const fb_bitfield& field, uint32_t bits, bool required,
     return true;
 }
 
-/**
- * @brief  Quantize an 8-bit component into a validated framebuffer bitfield.
- * @param  [in] value Component intensity.
- * @param  [in] field Previously validated bitfield with a length of at most eight.
- * @retval Component Packed component bits, or zero for an absent channel.
- */
+// Quantize an 8-bit component into a validated framebuffer bitfield.
 uint32_t packChannel(uint8_t value, const fb_bitfield& field) {
     if (!field.length) return 0;
     return (static_cast<uint32_t>(value) >> (8 - field.length)) << field.offset;
@@ -46,22 +33,11 @@ uint32_t packChannel(uint8_t value, const fb_bitfield& field) {
 
 } // namespace
 
-/**
- * @brief  Validate a framebuffer layout and bind its borrowed memory.
- * @param  [in,out] memory Writable storage for the framebuffer surface.
- * @param  [in] length Available storage length in bytes.
- * @param  [in] fixed Driver memory layout and visual information.
- * @param  [in] variable Driver resolution, offsets, and pixel bitfields.
- * @retval true The surface is bound to a supported, valid layout.
- * @retval false The memory bounds or pixel format are invalid.
- * @warning The caller owns the memory and must keep it and the display mode valid until reset().
- */
 bool FramebufferSurface::configure(uint8_t* memory, size_t length,
                                    const fb_fix_screeninfo& fixed,
                                    const fb_var_screeninfo& variable) {
     reset();
     const uint32_t bits = variable.bits_per_pixel;
-    /* 合法性校验 */
     if (!memory || fixed.type != FB_TYPE_PACKED_PIXELS ||
         fixed.visual != FB_VISUAL_TRUECOLOR || variable.nonstd || variable.grayscale ||
         variable.rotate || (variable.vmode & FB_VMODE_YWRAP) ||
@@ -69,7 +45,6 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
         !variable.xres || !variable.yres || variable.xres > INT_MAX ||
         variable.yres > INT_MAX) return false;
 
-    /* 计算画面边界，显存范围 */
     const uint64_t right = static_cast<uint64_t>(variable.xoffset) + variable.xres;
     const uint64_t bottom = static_cast<uint64_t>(variable.yoffset) + variable.yres;
     const uint64_t rowBytes = right * (bits / 8);
@@ -97,13 +72,6 @@ bool FramebufferSurface::configure(uint8_t* memory, size_t length,
     return true;
 }
 
-/**
- * @brief  Scale and center a BGR frame in the visible framebuffer area.
- * @param  [in] bgr Nonempty CV_8UC3 input image.
- * @retval true The frame was written to the configured surface.
- * @retval false No surface is bound or the input image is invalid.
- * @note   Preserves aspect ratio, row padding, and nonvisible pages; OpenCV errors propagate.
- */
 bool FramebufferSurface::render(const cv::Mat& bgr) {
     if (!memory_ || bgr.empty() || bgr.type() != CV_8UC3)
         return false;
@@ -195,11 +163,6 @@ bool FramebufferSurface::render(const cv::Mat& bgr) {
     return true;
 }
 
-/**
- * @brief  Draw the LCD photo button without replacing the camera frame.
- * @retval true The button was drawn on a configured surface.
- * @retval false The surface is unavailable or too small for a button.
- */
 bool FramebufferSurface::renderPhotoButton() {
     const PhotoButton button = photoButton();
     if (button.width <= 0 || button.height <= 0) return false;
@@ -207,20 +170,11 @@ bool FramebufferSurface::renderPhotoButton() {
     return true;
 }
 
-/**
- * @brief  Return the configured visible framebuffer dimensions.
- * @retval pair<int, int> Width and height in screen pixels; both are zero when unconfigured.
- */
 std::pair<int, int> FramebufferSurface::screenSize() const {
     if (!memory_) return {0, 0};
     return {static_cast<int>(variable_.xres), static_cast<int>(variable_.yres)};
 }
 
-/**
- * @brief  Return a small circular photo button anchored at the lower-right corner.
- * @retval PhotoButton Button geometry in visible screen coordinates.
- * @note   The returned square bounds the circular hit area; very small surfaces do not expose a button.
- */
 PhotoButton FramebufferSurface::photoButton() const {
     const int screenWidth = static_cast<int>(variable_.xres);
     const int screenHeight = static_cast<int>(variable_.yres);
@@ -235,13 +189,6 @@ PhotoButton FramebufferSurface::photoButton() const {
     return button;
 }
 
-/**
- * @brief  Check whether a screen point falls inside the circular photo button.
- * @param  [in] x Horizontal screen coordinate.
- * @param  [in] y Vertical screen coordinate.
- * @retval true The point is within the circular button.
- * @retval false The point is outside or the surface has no button.
- */
 bool FramebufferSurface::isPhotoButton(int x, int y) const {
     const PhotoButton button = photoButton();
     if (button.width <= 0 || button.height <= 0) return false;
@@ -253,23 +200,10 @@ bool FramebufferSurface::isPhotoButton(int x, int y) const {
     return dx * dx + dy * dy <= radius * radius;
 }
 
-/**
- * @brief  Pack an RGB color into the configured framebuffer pixel format.
- * @param  [in] blue Blue channel intensity.
- * @param  [in] green Green channel intensity.
- * @param  [in] red Red channel intensity.
- * @retval uint32_t Packed pixel value.
- */
 uint32_t FramebufferSurface::packPixel(uint8_t blue, uint8_t green, uint8_t red) const {
     return alpha_ | redTable_[red] | greenTable_[green] | blueTable_[blue];
 }
 
-/**
- * @brief  Write one packed pixel inside the visible framebuffer area.
- * @param  [in] x Horizontal visible coordinate.
- * @param  [in] y Vertical visible coordinate.
- * @param  [in] pixel Packed framebuffer pixel.
- */
 void FramebufferSurface::writePixel(int x, int y, uint32_t pixel) {
     const PhotoButton screen = {0, 0, static_cast<int>(variable_.xres),
                                 static_cast<int>(variable_.yres)};
@@ -291,10 +225,7 @@ void FramebufferSurface::writePixel(int x, int y, uint32_t pixel) {
     }
 }
 
-/**
- * @brief  Draw a compact white circular photo button over the current LCD frame.
- * @note   The overlay is written only to the framebuffer and is not included in JPEG output.
- */
+// Draw the photo button directly into the mapped framebuffer.
 void FramebufferSurface::drawPhotoButton() {
     const PhotoButton button = photoButton();
     if (button.width <= 0) return;
@@ -327,15 +258,14 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     const int screenWidth  = static_cast<int>(variable_.xres);
     const int screenHeight = static_cast<int>(variable_.yres);
 
-    // Keep diagnostics inside the side margin on the board's 1024x600 mode.
+    // Keep diagnostics inside the side margin on the 1024x600 board layout.
     const int panelWidth  = 100;
     const int panelHeight = 120;
 
     if (screenWidth < panelWidth + 8 || screenHeight < panelHeight + 8)
         return false;
 
-    /* 建图 */
-    cv::Mat panel(panelHeight, panelWidth, CV_8UC3, cv::Scalar(0, 0, 0)); /* black */
+    cv::Mat panel(panelHeight, panelWidth, CV_8UC3, cv::Scalar(0, 0, 0));
 
     std::ostringstream captureText;
     captureText << "CAP " << std::fixed << std::setprecision(1) << stats.captureFps;
@@ -349,7 +279,6 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     std::ostringstream jpegText;
     jpegText << "JPEG " << std::fixed << std::setprecision(1) << stats.jpegMs << "ms";
 
-    /* ostringstream x; x.str() 拿到完整字符串 */
     cv::putText(panel, captureText.str(), cv::Point(6, 22),
                 cv::FONT_HERSHEY_SIMPLEX, 0.38,
                 cv::Scalar(80, 255, 80), 1, cv::LINE_AA);
@@ -366,7 +295,6 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
                 cv::FONT_HERSHEY_SIMPLEX, 0.38,
                 cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 
-    /* draw */
     const int offsetX = 4;
     const int offsetY = 8;
 
@@ -380,10 +308,6 @@ bool FramebufferSurface::renderStats(const DisplayStats& stats) {
     return true;
 }
 
-/**
- * @brief  Unbind borrowed memory and release the scaling cache.
- * @note   Does not free the caller's memory or clear the display.
- */
 void FramebufferSurface::reset() {
     memory_ = nullptr;
     sourceWidth_ = sourceHeight_ = 0;
@@ -394,25 +318,12 @@ void FramebufferSurface::reset() {
     initializedPages_ = 0;
 }
 
-/**
- * @brief  Select the framebuffer page used by subsequent drawing operations.
- * @param  [in] page Zero-based page index in the configured virtual framebuffer.
- * @retval true The page is available and selected.
- * @retval false The surface is unconfigured or the page is outside the buffer.
- */
 bool FramebufferSurface::setPage(uint32_t page) {
     if (!memory_ || page >= pageCount_) return false;
     page_ = page;
     return true;
 }
 
-/**
- * @brief  Open a framebuffer device and map its existing display mode.
- * @param  [in] device Framebuffer device path.
- * @retval true Display memory is mapped and the pixel layout is supported.
- * @retval false Device access, mapping, or layout validation failed.
- * @note   Releases any previous display resources; does not set panel timing or backlight.
- */
 bool FramebufferDisplay::open(const std::string& device) {
     close();
     fd_ = ::open(device.c_str(), O_RDWR | O_CLOEXEC);
@@ -468,13 +379,6 @@ bool FramebufferDisplay::open(const std::string& device) {
     return true;
 }
 
-/**
- * @brief  Render a BGR frame through the bound LCD surface.
- * @param  [in] bgr Nonempty CV_8UC3 input image.
- * @retval true The frame was rendered.
- * @retval false The display is unopened or the input is invalid.
- * @note   OpenCV rendering errors propagate to the caller.
- */
 bool FramebufferDisplay::render(const cv::Mat& bgr) {
     if (!surface_.setPage(doubleBuffered_ ? backPage_ : frontPage_) || !surface_.render(bgr))
         return false;
@@ -484,12 +388,6 @@ bool FramebufferDisplay::render(const cv::Mat& bgr) {
     return true;
 }
 
-/**
- * @brief  Present a rendered page through the framebuffer page-flip ioctl.
- * @param  [in] page Zero-based page index to make visible.
- * @retval true The page was presented, or single-buffer fallback was enabled.
- * @retval false The display is unavailable or the page index is invalid.
- */
 bool FramebufferDisplay::presentPage(uint32_t page) {
     if (fd_ < 0 || !doubleBuffered_ || page > 1) return false;
     if (vsyncState_ != 0) {
@@ -517,29 +415,14 @@ bool FramebufferDisplay::presentPage(uint32_t page) {
     return true;
 }
 
-/**
- * @brief  Return the visible framebuffer dimensions used for touch normalization.
- * @retval pair<int, int> Width and height in screen pixels; both are zero when unopened.
- */
 std::pair<int, int> FramebufferDisplay::screenSize() const {
     return surface_.screenSize();
 }
 
-/**
- * @brief  Return the photo button rectangle in framebuffer coordinates.
- * @retval PhotoButton Current button geometry, or zero dimensions if unavailable.
- */
 PhotoButton FramebufferDisplay::photoButton() const {
     return surface_.photoButton();
 }
 
-/**
- * @brief  Check whether a framebuffer coordinate activates the photo button.
- * @param  [in] x Horizontal framebuffer coordinate.
- * @param  [in] y Vertical framebuffer coordinate.
- * @retval true The coordinate is inside the button.
- * @retval false The coordinate is outside the button or the device is unopened.
- */
 bool FramebufferDisplay::isPhotoButton(int x, int y) const {
     return surface_.isPhotoButton(x, y);
 }
@@ -548,10 +431,6 @@ bool FramebufferDisplay::renderStats(const DisplayStats& stats) {
     return surface_.renderStats(stats);
 }
 
-/**
- * @brief  Unbind and unmap display memory, then close the device.
- * @note   Safe to call repeatedly; does not clear the screen or restore its previous contents.
- */
 void FramebufferDisplay::close() {
     surface_.reset();
     if (memory_) munmap(memory_, length_);
@@ -567,9 +446,6 @@ void FramebufferDisplay::close() {
     vsyncState_ = -1;
 }
 
-/**
- * @brief  Unmap display memory and close the framebuffer device.
- */
 FramebufferDisplay::~FramebufferDisplay() {
     close();
 }

@@ -8,9 +8,7 @@
 
 class LcdProcess {
 public:
-    /**
-     * @brief  Create an inactive LCD process controller.
-     */
+    // Create an inactive LCD process controller.
     LcdProcess() = default;
     /**
      * @brief  Stop the LCD child and release shared synchronization resources.

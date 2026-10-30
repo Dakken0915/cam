@@ -8,16 +8,12 @@
 #include <stdexcept>
 #include <vector>
 
-/**
- * @brief  Throw a test failure when an assertion is false.
- */
+// Throw when an assertion is false.
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-/**
- * @brief  Check framebuffer pixel formats, borders, offsets, padding, and memory guards.
- */
+// Check pixel formats, borders, offsets, padding, and guards.
 void testSurface(int bits, bool swapRedBlue = false) {
     const size_t bytes = bits / 8;
     fb_var_screeninfo variable{};
@@ -69,9 +65,7 @@ void testSurface(int bits, bool swapRedBlue = false) {
     require(!surface.configure(memory.data(), fixed.smem_len, fixed, variable), "unsupported visual accepted");
 }
 
-/**
- * @brief  Verify that the LCD photo button is drawn immediately and has a usable hit area.
- */
+// Verify the photo button and hit area.
 void testPhotoButton() {
     fb_var_screeninfo variable{};
     variable.xres = 240;
@@ -108,9 +102,7 @@ void testPhotoButton() {
     require(topLeft == 0xffffffffu, "photo button border was not rendered");
 }
 
-/**
- * @brief  Check padded YUYV conversion, JPEG decoding, and invalid encoder inputs.
- */
+// Check YUYV conversion, JPEG decoding, and invalid inputs.
 void testEncoder() {
     JpegEncoder encoder;
     const std::vector<uint8_t> yuyv{16, 128, 16, 128, 0xa5, 0xa5, 0xa5, 0xa5,
@@ -131,9 +123,7 @@ void testEncoder() {
     require(rejected, "invalid JPEG quality accepted");
 }
 
-/**
- * @brief  Check oldest-frame eviction, draining after closure, and consumer wakeup.
- */
+// Check queue eviction, draining, and wakeup.
 void testQueue() {
     bool rejected = false;
     try { BoundedQueue<int> invalid(0); }
@@ -150,9 +140,7 @@ void testQueue() {
     require(queue.take(value) && value == 3, "closed queue must drain");
     require(!queue.take(value), "push after close accepted");
     BoundedQueue<int> waiting(1);
-    /**
-     * @brief  Wait for an empty queue to verify that close() wakes the consumer.
-     */
+    // Wait for close() to wake an empty queue consumer.
     auto consumer = std::async(std::launch::async, [&waiting] {
         int item;
         return waiting.take(item);
@@ -163,9 +151,7 @@ void testQueue() {
     require(!consumer.get(), "closed empty queue returned an item");
 }
 
-/**
- * @brief  Run video pipeline regression tests without camera or LCD hardware.
- */
+// Run video pipeline tests without camera or LCD hardware.
 int main() {
     try {
         testSurface(16);

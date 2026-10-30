@@ -22,16 +22,12 @@ bool acceptMjpeg = false;
 bool deviceCapsInvalid = false;
 v4l2_buffer dequeued{};
 
-/**
- * @brief  Throw a test failure when a simulated driver assertion is false.
- */
+// Throw when a simulated driver assertion is false.
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
-/**
- * @brief  Reset simulated driver behavior and verify resource counters are clear.
- */
+// Reset simulated driver state and resource counters.
 void reset() {
     require(openCount == 0 && mappingCount == 0, "capture resources leaked");
     queuedCount = streamOffCount = 0;
@@ -45,34 +41,26 @@ void reset() {
 }
 }
 
-/**
- * @brief  Simulate opening a camera and count owned descriptors.
- */
+// Simulate opening a camera.
 extern "C" int __wrap_open(const char*, int, ...) {
     ++openCount;
     return 123;
 }
 
-/**
- * @brief  Simulate closing a descriptor to detect resource leaks.
- */
+// Simulate closing a descriptor.
 extern "C" int __wrap_close(int) {
     --openCount;
     return 0;
 }
 
-/**
- * @brief  Simulate camera readiness, timeout, and signal interruption.
- */
+// Simulate camera readiness and interruption.
 extern "C" int __wrap_poll(pollfd* descriptors, nfds_t, int) {
     descriptors[0].revents = POLLIN;
     if (pollResult < 0) errno = EINTR;
     return pollResult;
 }
 
-/**
- * @brief  Simulate camera buffer mapping and inject a selected mapping failure.
- */
+// Simulate buffer mapping and optional failure.
 extern "C" void* __wrap_mmap(void*, size_t, int, int, int, off_t offset) {
     if (offset == failMapping) {
         errno = ENOMEM;
@@ -82,17 +70,13 @@ extern "C" void* __wrap_mmap(void*, size_t, int, int, int, off_t offset) {
     return storage[offset];
 }
 
-/**
- * @brief  Simulate unmapping a camera buffer and update the mapping count.
- */
+// Simulate buffer unmapping.
 extern "C" int __wrap_munmap(void*, size_t) {
     --mappingCount;
     return 0;
 }
 
-/**
- * @brief  Simulate V4L2 negotiation and buffer control with injectable failures.
- */
+// Simulate V4L2 negotiation and buffer control.
 extern "C" int __wrap_ioctl(int, unsigned long request, ...) {
     va_list arguments;
     va_start(arguments, request);
@@ -128,9 +112,7 @@ extern "C" int __wrap_ioctl(int, unsigned long request, ...) {
     return 0;
 }
 
-/**
- * @brief  Test negotiated geometry, frame validation, timeouts, and resource cleanup.
- */
+// Test negotiation, frame validation, timeouts, and cleanup.
 int main() {
     try {
         reset();

@@ -82,9 +82,7 @@ const char kIndexPage[] = R"HTML(<!doctype html>
 </body>
 </html>)HTML";
 
-/**
- * @brief  Extract a snapshot filename from its path.
- */
+// Extract a snapshot filename from its path.
 std::string baseName(const std::string& path) {
     const std::string::size_type slash = path.find_last_of("/\\");
     return slash == std::string::npos ? path : path.substr(slash + 1);
@@ -92,34 +90,16 @@ std::string baseName(const std::string& path) {
 
 }  // namespace
 
-/**
- * @brief  Configure snapshot storage and HTTP resource limits.
- * @param  [in] snapshotDir Snapshot directory; its parent directory must exist.
- * @param  [in] maxSnapshots Maximum snapshot count; zero disables this limit.
- * @param  [in] maxClients Maximum simultaneous clients; zero is treated as one.
- */
 HttpServer::HttpServer(const std::string& snapshotDir, size_t maxSnapshots,
                        size_t maxClients)
     : snapshotDir_(snapshotDir),
       maxSnapshots_(maxSnapshots),
       maxClients_(maxClients == 0 ? 1 : maxClients) {}
 
-/**
- * @brief  Stop the HTTP service and wait for active client handlers.
- */
 HttpServer::~HttpServer() {
     stop();
 }
 
-/**
- * @brief  Send a complete payload while handling short writes and interruptions.
- * @param  [in] fd Connected client socket.
- * @param  [in] data Payload storage.
- * @param  [in] length Number of bytes to send.
- * @retval true All bytes were sent.
- * @retval false A send operation failed or the connection closed.
- * @note   Uses MSG_NOSIGNAL to suppress SIGPIPE.
- */
 bool HttpServer::writeAll(int fd, const void* data, size_t length) {
     const char* cursor = static_cast<const char*>(data);
     size_t sent = 0;
@@ -135,13 +115,6 @@ bool HttpServer::writeAll(int fd, const void* data, size_t length) {
     return true;
 }
 
-/**
- * @brief  Send a text response with an explicit length and connection-close header.
- * @param  [in] fd Connected client socket.
- * @param  [in] status HTTP status code and reason phrase.
- * @param  [in] body Response text.
- * @param  [in] extraHeaders Optional CRLF-terminated response headers.
- */
 void HttpServer::sendTextResponse(int fd, const std::string& status,
                                   const std::string& body,
                                   const std::string& extraHeaders) {
@@ -157,13 +130,6 @@ void HttpServer::sendTextResponse(int fd, const std::string& status,
     writeAll(fd, data.data(), data.size());
 }
 
-/**
- * @brief  Listen on an IPv4 port and start the accept thread.
- * @param  [in] port TCP port in the range 1 to 65535.
- * @retval true The service started or was already running.
- * @retval false Port validation, socket setup, or thread creation failed.
- * @note   Binds all IPv4 interfaces and clears old frame data when restarting.
- */
 bool HttpServer::start(int port) {
     std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
     if (running_) return true;
@@ -219,9 +185,6 @@ bool HttpServer::start(int port) {
     return true;
 }
 
-/**
- * @brief  Accept clients, enforce the connection limit, and track handler lifetimes.
- */
 void HttpServer::acceptLoop() {
     while (running_) {
         sockaddr_in clientAddress{};
@@ -265,9 +228,6 @@ void HttpServer::acceptLoop() {
             continue;
         }
         try {
-            /**
-             * @brief  Handle a client and release its socket and connection slot on completion.
-             */
             std::thread([this, clientFd] {
                 try {
                     handleClient(clientFd);
@@ -296,11 +256,6 @@ void HttpServer::acceptLoop() {
     }
 }
 
-/**
- * @brief  Validate an HTTP request and dispatch supported camera endpoints.
- * @param  [in] clientFd Connected client socket.
- * @note   Accepts GET requests with headers up to 8192 bytes and sends errors for invalid requests.
- */
 void HttpServer::handleClient(int clientFd) {
     std::string request;
     char buffer[2048];
@@ -353,10 +308,6 @@ void HttpServer::handleClient(int clientFd) {
 
 }
 
-/**
- * @brief  Send the embedded camera preview and snapshot page.
- * @param  [in] clientFd Connected client socket.
- */
 void HttpServer::serveIndex(int clientFd) {
     const size_t pageLength = sizeof(kIndexPage) - 1;
     std::ostringstream header;
@@ -371,11 +322,6 @@ void HttpServer::serveIndex(int clientFd) {
     }
 }
 
-/**
- * @brief  Send new JPEG frames as a multipart MJPEG stream.
- * @param  [in] clientFd Connected client socket.
- * @note   Waits for new frames and exits when the service stops or the client disconnects.
- */
 void HttpServer::serveStream(int clientFd) {
     const std::string header =
         "HTTP/1.1 200 OK\r\n"
@@ -425,11 +371,6 @@ void HttpServer::serveStream(int clientFd) {
     }
 }
 
-/**
- * @brief  Save the current JPEG and return it as a download.
- * @param  [in] clientFd Connected client socket.
- * @note   Returns 503 without a frame, 507 at the snapshot limit, or 500 on storage failure.
- */
 void HttpServer::serveSnapshot(int clientFd) {
     std::vector<uint8_t> jpeg;
     std::string path;
@@ -462,9 +403,6 @@ void HttpServer::serveSnapshot(int clientFd) {
     }
 }
 
-/**
- * @brief  Generate a local-time snapshot timestamp with microsecond precision.
- */
 std::string HttpServer::getTimestamp() const {
     const auto now = std::chrono::system_clock::now();
     const auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -481,9 +419,6 @@ std::string HttpServer::getTimestamp() const {
     return timestamp;
 }
 
-/**
- * @brief  Count snapshot_*.jpg directory entries, returning zero if the directory cannot be opened.
- */
 size_t HttpServer::snapshotCount() const {
     DIR* directory = opendir(snapshotDir_.c_str());
     if (directory == nullptr) return 0;
@@ -500,16 +435,6 @@ size_t HttpServer::snapshotCount() const {
     return count;
 }
 
-/**
- * @brief  Copy and save the latest JPEG under the snapshot quota lock.
- * @param  [out] jpeg Copy of the current JPEG data.
- * @param  [out] path Path of the saved snapshot.
- * @retval Saved The snapshot was written successfully.
- * @retval NoFrame No JPEG is available.
- * @retval StorageFull The snapshot count limit was reached.
- * @retval IoError Directory creation, validation, or file writing failed.
- * @note   Use output parameters only on Saved; does not create missing parent directories or fsync the file.
- */
 HttpServer::SnapshotResult HttpServer::saveSnapshot(std::vector<uint8_t>& jpeg,
                                                      std::string& path) {
     {
@@ -558,11 +483,6 @@ HttpServer::SnapshotResult HttpServer::saveSnapshot(std::vector<uint8_t>& jpeg,
     return SnapshotResult::Saved;
 }
 
-/**
- * @brief  Publish an owned copy of the latest nonempty JPEG.
- * @param  [in] jpeg Encoded JPEG bytes.
- * @note   Thread-safe; empty input is ignored and valid input increments the frame sequence.
- */
 void HttpServer::updateFrame(const std::vector<uint8_t>& jpeg) {
     if (jpeg.empty()) return;
     std::lock_guard<std::mutex> lock(frameMutex_);
@@ -570,21 +490,11 @@ void HttpServer::updateFrame(const std::vector<uint8_t>& jpeg) {
     ++frameSequence_;
 }
 
-/**
- * @brief  Save the current JPEG for a non-HTTP trigger such as the LCD button.
- * @param  [out] path Saved file path when the operation succeeds.
- * @retval SnapshotResult Result from the shared snapshot writer.
- * @note   Uses the same directory, quota, naming, and locking rules as /snapshot.
- */
 HttpServer::SnapshotResult HttpServer::captureSnapshot(std::string& path) {
     std::vector<uint8_t> jpeg;
     return saveSnapshot(jpeg, path);
 }
 
-/**
- * @brief  Stop listening, shut down clients, and wait for all handlers.
- * @note   Safe to call repeatedly; handler completion is required before object destruction.
- */
 void HttpServer::stop() {
     std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
     if (!running_.exchange(false)) return;
@@ -599,8 +509,5 @@ void HttpServer::stop() {
 
     std::unique_lock<std::mutex> lock(clientsMutex_);
     for (int clientFd : clientFds_) shutdown(clientFd, SHUT_RDWR);
-    /**
-     * @brief  Allow shutdown to finish only after all client handlers have completed.
-     */
     clientsStopped_.wait(lock, [this] { return activeClients_ == 0; });
 }

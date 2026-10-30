@@ -29,9 +29,7 @@ public:
     explicit HttpServer(const std::string& snapshotDir = "./snapshots",
                         size_t maxSnapshots = 100,
                         size_t maxClients = 8);
-    /**
-     * @brief  Stop the HTTP service and wait for active client handlers.
-     */
+    // Stop the service and wait for client handlers.
     ~HttpServer();
 
     /**

@@ -246,11 +246,11 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 int lcdInterval, int faceInterval,
                 FaceAnalysisWorker& faceWorker, bool faceActive, PipelineState& state) {
     try {
-        /* 性能评估相关资源 */
+        // Performance counters for the one-second statistics window.
         using Clock = std::chrono::steady_clock;
         auto statsStart = Clock::now();
         uint64_t lastCapturedFrames = state.capturedFrames.load();
-        uint64_t statsFrames = 0;  /* frame count */
+        uint64_t statsFrames = 0;
         double encodeMs = 0.0;
         uint64_t inputFrames = 0;
 
@@ -298,7 +298,6 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             encoded.width = frame.width;
             encoded.height = frame.height;
             encoded.timestamp_us = frame.timestamp_us;
-            /* 编码处计时 */
             const auto encodeStart = Clock::now();
             if (mjpegInput) {
                 encoded.data = std::move(frame.data);
@@ -312,7 +311,6 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             const auto now = Clock::now();
             const double elapsed = std::chrono::duration<double>(now - statsStart).count();
 
-            /* 性能参数计算 */
             if(elapsed >= 1.0) {
                 DisplayStats stats;
                 stats.fps    = statsFrames / elapsed;

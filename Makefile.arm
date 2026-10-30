@@ -1,4 +1,4 @@
-# 使用 IMX6ULL Buildroot SDK 交叉编译
+# Cross-compile with the i.MX6ULL Buildroot SDK.
 .DEFAULT_GOAL := cam_server_arm
 PROJECT_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 BUILDROOT_SDK ?= $(abspath $(PROJECT_DIR)/../../toolchain/100ask_imx6ull-sdk/ToolChain/arm-buildroot-linux-gnueabihf_sdk-buildroot)
@@ -6,7 +6,7 @@ ifeq ($(origin CXX),default)
 CXX := $(BUILDROOT_SDK)/bin/arm-buildroot-linux-gnueabihf-g++
 endif
 ifeq ($(wildcard $(CXX)),)
-$(error ARM 编译器不存在: $(CXX)；请检查 BUILDROOT_SDK 或指定兼容的 CXX)
+$(error ARM compiler not found: $(CXX); check BUILDROOT_SDK or set a compatible CXX)
 endif
 CXXFLAGS = -std=c++14 -Wall -Wextra -O2 -g -Iinclude
 

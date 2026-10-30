@@ -21,9 +21,7 @@ struct FaceAnalysis {
 
 class FaceAnalyzer {
 public:
-    /**
-     * @brief  Create an unconfigured Haar face analyzer.
-     */
+    // Create an unconfigured analyzer.
     FaceAnalyzer() = default;
 
     /**
@@ -60,11 +58,7 @@ public:
      */
     static double compareGrayscale(const cv::Mat& first, const cv::Mat& second);
 
-    /**
-     * @brief  Report whether a Haar cascade is ready for detection.
-     * @retval true A classifier has been loaded.
-     * @retval false Detection is disabled because no classifier is loaded.
-     */
+    // Report whether the detector is ready.
     bool isReady() const;
 
 private:
@@ -89,14 +83,10 @@ public:
      */
     FaceAnalysisWorker(FaceAnalyzer& analyzer, double threshold, unsigned int interval);
 
-    /**
-     * @brief  Stop the worker and wait for any active detection to finish.
-     */
+    // Stop the worker and wait for completion.
     ~FaceAnalysisWorker();
 
-    /**
-     * @brief  Start the background detection thread.
-     */
+    // Start background detection.
     void start();
 
     /**
@@ -113,9 +103,7 @@ public:
      */
     void submitSelected(const cv::Mat& bgr);
 
-    /**
-     * @brief  Stop the worker, discard pending work, and join its thread.
-     */
+    // Stop detection and join the worker thread.
     void stop();
 
 private:

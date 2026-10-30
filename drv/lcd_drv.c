@@ -22,6 +22,7 @@
 #define LCDIF_CTRL1_CUR_FRAME_DONE_IRQ    (1U << 9)
 #define LCDIF_CTRL1_VSYNC_EDGE_IRQ        (1U << 8)
 
+/* rigister table */
 struct imx6ull_lcdif {
 	volatile unsigned int CTRL;
 	volatile unsigned int CTRL_SET;
@@ -103,7 +104,7 @@ struct imx6ull_lcdif {
 };
 
 struct lcd_drvdata {
-	struct device *dev;
+	struct device *dev;           /* dev ptr */
 	struct fb_info *info;
 	struct imx6ull_lcdif *lcdif;
 	struct clk *clk_pix;
@@ -116,7 +117,7 @@ struct lcd_drvdata {
 	unsigned int current_page;
 	struct completion frame_done;
 	struct completion vsync_done;
-	spinlock_t lock;
+	spinlock_t lock;               /* protect NEXT_BUF */
 };
 
 static unsigned int pseudo_palette[16];

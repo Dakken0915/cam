@@ -53,15 +53,9 @@ public:
      * @retval false The surface is unavailable or too small for a button.
      */
     bool renderPhotoButton();
-    /**
-     * @brief  Return the configured visible framebuffer dimensions.
-     * @retval pair<int, int> Width and height in screen pixels; both are zero when unconfigured.
-     */
+    // Return the visible framebuffer dimensions.
     std::pair<int, int> screenSize() const;
-    /**
-     * @brief  Return the LCD photo button rectangle.
-     * @retval PhotoButton Screen coordinates and dimensions; zero dimensions mean unavailable.
-     */
+    // Return the photo button rectangle.
     PhotoButton photoButton() const;
     /**
      * @brief  Test whether a screen coordinate is inside the photo button.
@@ -79,21 +73,13 @@ public:
      * @note   The overlay is written directly to the framebuffer and is not included in JPEG output.
      */
     bool renderStats(const DisplayStats& stats);
-    /**
-     * @brief  Unbind borrowed memory and release the scaling cache.
-     * @note   Does not free the caller's memory or clear the display.
-     */
+    // Unbind borrowed memory and release caches.
     void reset();
 
 private:
     friend class FramebufferDisplay;
 
-    /**
-     * @brief  Select the framebuffer page used by subsequent drawing operations.
-     * @param  [in] page Zero-based page index in the configured virtual framebuffer.
-     * @retval true The page is available and selected.
-     * @retval false The surface is unconfigured or the page is outside the buffer.
-     */
+    // Select the page used by subsequent drawing operations.
     bool setPage(uint32_t page);
 
     uint8_t* memory_ = nullptr;
@@ -118,21 +104,12 @@ private:
 
 class FramebufferDisplay {
 public:
-    /**
-     * @brief  Create an unopened framebuffer display object.
-     */
+    // Create an unopened display.
     FramebufferDisplay() = default;
-    /**
-     * @brief  Unmap display memory and close the framebuffer device.
-     */
+    // Unmap display memory and close the device.
     ~FramebufferDisplay();
-    /**
-     * @brief  Prevent copying ownership of the display descriptor and mapping.
-     */
+    // Display ownership is non-copyable.
     FramebufferDisplay(const FramebufferDisplay&) = delete;
-    /**
-     * @brief  Prevent copy assignment of framebuffer resources.
-     */
     FramebufferDisplay& operator=(const FramebufferDisplay&) = delete;
 
     /**
@@ -151,15 +128,9 @@ public:
      * @note   OpenCV rendering errors propagate to the caller.
      */
     bool render(const cv::Mat& bgr);
-    /**
-     * @brief  Return the visible framebuffer dimensions used for touch normalization.
-     * @retval pair<int, int> Width and height in screen pixels; both are zero when unopened.
-     */
+    // Return the visible dimensions used for touch normalization.
     std::pair<int, int> screenSize() const;
-    /**
-     * @brief  Return the photo button rectangle in framebuffer coordinates.
-     * @retval PhotoButton Current button geometry, or zero dimensions if unavailable.
-     */
+    // Return the photo button rectangle.
     PhotoButton photoButton() const;
     /**
      * @brief  Check whether a framebuffer coordinate activates the photo button.

@@ -6,12 +6,6 @@
 #include <opencv2/imgproc.hpp>
 #include "debug.hpp"
 
-/**
- * @brief  Load a Haar cascade classifier from an XML file.
- * @param  [in] path Haar cascade XML path.
- * @retval true The classifier was loaded successfully.
- * @retval false The path is empty or the XML is invalid.
- */
 bool FaceAnalyzer::loadCascade(const std::string& path) {
     cascade_ = cv::CascadeClassifier();
     if (path.empty() || !cascade_.load(path)) {
@@ -22,12 +16,6 @@ bool FaceAnalyzer::loadCascade(const std::string& path) {
     return true;
 }
 
-/**
- * @brief  Load and normalize an optional grayscale reference image.
- * @param  [in] path Reference image path; an empty path disables comparison.
- * @retval true The reference is disabled or loaded successfully.
- * @retval false The image cannot be decoded or normalized.
- */
 bool FaceAnalyzer::loadReference(const std::string& path) {
     referenceGray_.release();
     if (path.empty()) return true;
@@ -41,13 +29,6 @@ bool FaceAnalyzer::loadReference(const std::string& path) {
     return true;
 }
 
-/**
- * @brief  Detect faces and compare each face with the configured reference.
- * @param  [in] bgr Nonempty CV_8UC3 camera frame.
- * @param  [in] threshold Minimum normalized similarity in the range 0..1.
- * @retval FaceAnalysis Detected face rectangles and optional similarity results.
- * @note   Detection returns an empty result when no cascade has been loaded.
- */
 FaceAnalysis FaceAnalyzer::analyze(const cv::Mat& bgr, double threshold) {
     FaceAnalysis result;
     if (!isReady() || bgr.empty() || bgr.type() != CV_8UC3) return result;
@@ -85,13 +66,6 @@ FaceAnalysis FaceAnalyzer::analyze(const cv::Mat& bgr, double threshold) {
     return result;
 }
 
-/**
- * @brief  Compare two images after grayscale, resize, and histogram normalization.
- * @param  [in] first First image, any single or three channel OpenCV image.
- * @param  [in] second Second image, any single or three channel OpenCV image.
- * @retval double Similarity in the range 0..1, where 1 means identical normalized pixels.
- * @note   Invalid or empty images return 0.0.
- */
 double FaceAnalyzer::compareGrayscale(const cv::Mat& first, const cv::Mat& second) {
     const cv::Mat firstGray = normalizeGray(first);
     const cv::Mat secondGray = normalizeGray(second);
@@ -102,11 +76,6 @@ double FaceAnalyzer::compareGrayscale(const cv::Mat& first, const cv::Mat& secon
     return std::max(0.0, std::min(1.0, 1.0 - meanDifference));
 }
 
-/**
- * @brief  Convert an image to a normalized grayscale face patch.
- * @param  [in] image Source image or face crop.
- * @retval cv::Mat 64x64 CV_32F normalized grayscale image; empty for invalid input.
- */
 cv::Mat FaceAnalyzer::normalizeGray(const cv::Mat& image) {
     if (image.empty() || (image.channels() != 1 && image.channels() != 3)) return {};
     cv::Mat gray;
@@ -121,44 +90,22 @@ cv::Mat FaceAnalyzer::normalizeGray(const cv::Mat& image) {
     return normalized;
 }
 
-/**
- * @brief  Report whether a Haar cascade is ready for detection.
- * @retval true A classifier has been loaded.
- * @retval false Detection is disabled because no classifier is loaded.
- */
 bool FaceAnalyzer::isReady() const {
     return !cascade_.empty();
 }
 
-/**
- * @brief  Create an asynchronous face analysis worker.
- * @param  [in,out] analyzer Loaded detector used by the worker thread.
- * @param  [in] threshold Minimum normalized grayscale similarity.
- * @param  [in] interval Number of submitted frames between analyses.
- */
 FaceAnalysisWorker::FaceAnalysisWorker(FaceAnalyzer& analyzer, double threshold,
                                        unsigned int interval)
     : analyzer_(analyzer), threshold_(threshold), interval_(std::max(1U, interval)) {}
 
-/**
- * @brief  Stop the worker and wait for any active detection to finish.
- */
 FaceAnalysisWorker::~FaceAnalysisWorker() {
     stop();
 }
 
-/**
- * @brief  Start the background detection thread.
- */
 void FaceAnalysisWorker::start() {
     if (!thread_.joinable()) thread_ = std::thread(&FaceAnalysisWorker::run, this);
 }
 
-/**
- * @brief  Submit a frame for decimated asynchronous analysis.
- * @param  [in] bgr Camera frame; selected frames are copied before returning.
- * @note   A pending frame is replaced by a newer frame when the worker is busy.
- */
 void FaceAnalysisWorker::submit(const cv::Mat& bgr) {
     if (frameCounter_++ % interval_ != 0 || bgr.empty()) return;
     submitSelected(bgr);
@@ -176,9 +123,6 @@ void FaceAnalysisWorker::submitSelected(const cv::Mat& bgr) {
     ready_.notify_one();
 }
 
-/**
- * @brief  Stop the worker, discard pending work, and join its thread.
- */
 void FaceAnalysisWorker::stop() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -190,9 +134,6 @@ void FaceAnalysisWorker::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-/**
- * @brief  Analyze pending frames and log changes in detection results.
- */
 void FaceAnalysisWorker::run() {
     int lastFaceCount = -1;
     bool lastMatched = false;

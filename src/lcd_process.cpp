@@ -155,6 +155,8 @@ bool LcdProcess::start(FramebufferDisplay& display, int width, int height) {
     height_ = height;
     const size_t frameBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
     sharedLength_ = sizeof(SharedState) + frameBytes * kSlotCount;
+
+    /* 可读可写，映射为共享，匿名 */
     shared_ = static_cast<SharedState*>(mmap(nullptr, sharedLength_, PROT_READ | PROT_WRITE,
                                               MAP_SHARED | MAP_ANONYMOUS, -1, 0));
     if (shared_ == MAP_FAILED) {

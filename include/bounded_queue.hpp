@@ -12,11 +12,7 @@
 template <typename T>
 class BoundedQueue {
 public:
-    /**
-     * @brief  Create a bounded queue with a positive capacity.
-     * @param  [in] capacity Maximum number of queued items.
-     * @note   Throws std::invalid_argument when capacity is zero.
-     */
+    // Create a queue with a positive capacity.
     explicit BoundedQueue(size_t capacity) : capacity_(capacity) {
         if (capacity == 0) throw std::invalid_argument("Queue capacity must be positive");
     }
@@ -27,7 +23,6 @@ public:
      * @note   Calls after close() are ignored; notifies a waiting consumer.
      */
     void push(T item) {
-        /* No condition wait is needed here, so lock_guard is sufficient. */
         std::lock_guard<std::mutex> lock(mtx_);
         if (closed_) return;
         
@@ -47,9 +42,6 @@ public:
      */
     bool take(T& out) {
         std::unique_lock<std::mutex> lock(mtx_);
-        /**
-         * @brief  Resume the consumer only when an item is available or the queue is closed.
-         */
         cv_.wait(lock, [&] { return !queue_.empty() || closed_; });
 
         if(queue_.empty())

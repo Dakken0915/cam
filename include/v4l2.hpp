@@ -21,21 +21,12 @@ public:
         Error
     };
 
-    /**
-     * @brief  Create an unopened camera capture object.
-     */
+    // Create an unopened camera capture object.
     V4l2Capture();
-    /**
-     * @brief  Stop capture and release the camera resources.
-     */
+    // Stop capture on destruction.
     ~V4l2Capture();
-    /**
-     * @brief  Prevent copying ownership of the camera descriptor and mapped buffers.
-     */
+    // Camera ownership is non-copyable.
     V4l2Capture(const V4l2Capture&) = delete;
-    /**
-     * @brief  Prevent copy assignment of camera resources.
-     */
     V4l2Capture& operator=(const V4l2Capture&) = delete;
 
     /**
@@ -78,22 +69,14 @@ public:
     FrameResult getFrame(vector<uint8_t>& out, uint32_t& sequence,
                          int timeoutMs = 250);
 
-    /**
-     * @brief  Return the image width negotiated with the camera driver.
-     */
+    // Return the negotiated image width.
     int width() const { return width_; }
-    /**
-     * @brief  Return the image height negotiated with the camera driver.
-     */
+    // Return the negotiated image height.
     int height() const { return height_; }
-    /**
-     * @brief  Return the negotiated YUYV row stride, including padding.
-     */
+    // Return the negotiated row stride.
     int bytesPerLine() const { return bytes_per_line_; }
 
-    /**
-     * @brief  Report whether the camera descriptor is open.
-     */
+    // Report whether the camera is open.
     bool isOpened() const { return fd_ >= 0; }
 
 private:
