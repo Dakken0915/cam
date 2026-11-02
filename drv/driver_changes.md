@@ -49,4 +49,4 @@ make -C /home/hxh1987370733/toolchain/100ask_imx6ull-sdk/Linux-4.9.88 \
 
 &emsp;&emsp;本次改动使用的是 LCDIF 控制器自身的帧扫描 DMA。内核中虽然启用了 `CONFIG_IMX_SDMA` 和 `CONFIG_MXS_DMA`，但当前用户态没有可直接提交 framebuffer 拷贝的 dmaengine 文件描述符，也没有加入私有 DMA ioctl。要做应用层 DMA 拷贝，仍需确认 BSP 的 DMA-BUF、dmaengine 申请通道和缓存一致性接口。
 
-&emsp;&emsp;双页显存会使显存占用翻倍；以 1024x600 RGB565 为例，显存从约 1.17 MiB 增加到约 2.34 MiB。板端实际显示尺寸由设备树时序决定，1280x640 时对应显存约 1.56 MiB 和 3.13 MiB。
+&emsp;&emsp;双页显存会使显存占用翻倍；以 1024x600 RGB565 为例，显存从约 1.17 MiB 增加到约 2.34 MiB。板端实际显示尺寸由设备树时序决定。

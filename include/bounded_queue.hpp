@@ -7,11 +7,20 @@
 #include <condition_variable>
 #include <utility>
 #include <stdexcept>
+#include <cstdint>
 #include "frame.hpp"
 
 template <typename T>
 class BoundedQueue {
 public:
+    struct Stats {
+        uint64_t pushed = 0;
+        uint64_t taken = 0;
+        uint64_t dropped = 0;
+        size_t depth = 0;
+        size_t highWater = 0;
+    };
+
     // Create a queue with a positive capacity.
     explicit BoundedQueue(size_t capacity) : capacity_(capacity) {
         if (capacity == 0) throw std::invalid_argument("Queue capacity must be positive");
@@ -25,11 +34,14 @@ public:
     void push(T item) {
         std::lock_guard<std::mutex> lock(mtx_);
         if (closed_) return;
-        
+
         if(queue_.size() >= capacity_) {
             queue_.pop_front();
+            ++stats_.dropped;
         }
         queue_.push_back(std::move(item));
+        ++stats_.pushed;
+        if (queue_.size() > stats_.highWater) stats_.highWater = queue_.size();
         cv_.notify_one();
     }
 
@@ -49,7 +61,20 @@ public:
 
         out = std::move(queue_.front());
         queue_.pop_front();
+        ++stats_.taken;
         return true;
+    }
+
+    /**
+     * @brief  Read cumulative queue counters and current occupancy under the queue lock.
+     * @retval Stats Consistent snapshot satisfying pushed = taken + dropped + depth.
+     * @note   Rejected pushes and unsuccessful takes do not change the counters.
+     */
+    Stats stats() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        Stats snapshot = stats_;
+        snapshot.depth = queue_.size();
+        return snapshot;
     }
 
     /**
@@ -68,6 +93,7 @@ private:
     std::deque<T>           queue_;
     size_t                  capacity_;
     bool                    closed_ = false;
+    Stats                   stats_{};
 };
 
 #endif

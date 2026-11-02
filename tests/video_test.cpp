@@ -133,12 +133,19 @@ void testQueue() {
     queue.push(1);
     queue.push(2);
     queue.push(3);
+    const auto fullStats = queue.stats();
+    require(fullStats.pushed == 3 && fullStats.taken == 0 && fullStats.dropped == 1 &&
+            fullStats.depth == 2 && fullStats.highWater == 2, "full queue counters incorrect");
     queue.close();
     queue.push(4);
     int value = 0;
     require(queue.take(value) && value == 2, "oldest frame not discarded");
     require(queue.take(value) && value == 3, "closed queue must drain");
     require(!queue.take(value), "push after close accepted");
+    const auto drainedStats = queue.stats();
+    require(drainedStats.pushed == 3 && drainedStats.taken == 2 &&
+            drainedStats.dropped == 1 && drainedStats.depth == 0 && drainedStats.highWater == 2,
+            "closed queue accounting incorrect");
     BoundedQueue<int> waiting(1);
     // Wait for close() to wake an empty queue consumer.
     auto consumer = std::async(std::launch::async, [&waiting] {
@@ -149,6 +156,28 @@ void testQueue() {
     require(consumer.wait_for(std::chrono::seconds(1)) == std::future_status::ready,
             "close did not wake consumer");
     require(!consumer.get(), "closed empty queue returned an item");
+
+    BoundedQueue<int> concurrent(3);
+    // Verify snapshot conservation while a producer and consumer race with frame dropping.
+    auto drain = std::async(std::launch::async, [&concurrent] {
+        int item;
+        uint64_t taken = 0;
+        while (concurrent.take(item)) ++taken;
+        return taken;
+    });
+    for (int i = 0; i < 10000; ++i) {
+        concurrent.push(i);
+        const auto snapshot = concurrent.stats();
+        require(snapshot.pushed == snapshot.taken + snapshot.dropped + snapshot.depth,
+                "concurrent queue snapshot lost frames");
+        require(snapshot.depth <= 3 && snapshot.highWater <= 3, "queue occupancy overflow");
+    }
+    concurrent.close();
+    const auto consumed = drain.get();
+    const auto finalStats = concurrent.stats();
+    require(finalStats.pushed == 10000 && finalStats.taken == consumed &&
+            finalStats.pushed == consumed + finalStats.dropped && finalStats.depth == 0,
+            "concurrent queue final accounting incorrect");
 }
 
 // Run video pipeline tests without camera or LCD hardware.

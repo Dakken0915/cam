@@ -157,3 +157,25 @@
 &emsp;&emsp;调试定位：第一次模块构建使用系统 GCC 13，虽然目标架构为 ARM，但生成的 `dsb st` 指令与旧内核当前汇编模式不兼容；根据 BSP 的 Buildroot 工具链信息切换到 `gcc-linaro-6.2.1-2016.11` 后通过交叉编译。编译过程中还发现 `drv` 缺少内核模块 Makefile，补充 `drv/Makefile` 后才能由 4.9 内核的 `M=... modules` 规则构建；随后将该 BSP 工具链设为 Makefile 默认值，避免直接执行 `make` 时回退到系统 GCC 13。驱动代码本身已通过 SDK 内核模块编译，真实中断号和 LCDIF 页翻转仍需板端 `dmesg`、`fbset` 和应用日志确认。
 
 &emsp;&emsp;性能瓶颈与观测：`dma_alloc_wc` 只改善 CPU 到 framebuffer 的连续写入属性，不能替代 OpenCV 缩放、像素打包或 LCD 总线带宽。上板后固定曝光、分辨率和 `--lcd-interval`，比较双缓冲前后的 `LCD`、`LCD_FPS`、`CAP/FPS`、父子进程 CPU 和画面延迟；用 `fbset` 检查两页布局，用 `dmesg` 检查 LCDIF 总线错误，用 `top -H` 或 `/proc/<pid>/stat` 检查线程负载。只有在确认显存拷贝仍是主要耗时时，才继续评估 BSP 私有硬件缩放或 DMA-BUF。
+
+## 2026-10-31：处理 LCDIF 运行一段时间后黑屏
+
+&emsp;&emsp;现象：程序运行一段时间后 LCD 黑屏，退出后再次启动仍然黑屏；这说明问题可能已经留在 LCDIF 控制器的持续扫描状态中，而不是单次用户态绘制失败。驱动原先启用双缓冲和页翻转，但没有设置 `LCDIF_CTRL1.RECOVER_ON_UNDERFLOW`。LCDIF FIFO 偶发欠载后可能继续输出无效画面，重启用户进程不会自动清除控制器的欠载状态。
+
+&emsp;&emsp;方案取舍：在 LCDIF 初始化时启用 bit 24 的欠载恢复，让控制器在下一帧重新恢复扫描。选择硬件已有的恢复机制，是因为它不改变 fbdev 用户态接口，也不需要在每次 `FBIOPAN_DISPLAY` 超时后贸然重置 LCDIF；替代方案是检测超时后关闭并重新初始化控制器，恢复更强但需要处理 RUN、FIFO、时钟和面板同步状态，错误的异步复位可能造成更严重的黑屏或撕裂。
+
+&emsp;&emsp;风险与边界：欠载恢复只能处理 LCDIF FIFO underflow，不能修复错误的像素时钟、设备树时序、背光 GPIO、电源、DMA 地址或总线错误。驱动仍需在板端检查 `dmesg`、LCDIF 状态和 `FBIOPAN_DISPLAY` 超时；若黑屏伴随总线错误，应进一步检查显存映射和内存带宽。用户态重新启动只能重新绘制显存，不能替代驱动重新 probe 或硬件复位。
+
+&emsp;&emsp;调试定位：对照 Linux `mxsfb` 的 LCDIF 初始化路径和 i.MX6ULL LCDIF 寄存器定义，确认 `RECOVER_ON_UNDERFLOW` 位为 `CTRL1` bit 24；当前驱动只配置了字节打包、帧完成和 VSYNC 相关位，缺少该恢复位。已在 `lcd_controller_init()` 写入 bit 24，并在启动后继续观察是否出现欠载、DMA 总线错误或帧完成超时。
+
+&emsp;&emsp;性能观测与后续：欠载恢复不会提升显存拷贝带宽，也不会降低 `LCD` 单次渲染时间。板端应固定 1024x600 模式、摄像头曝光和 `--lcd-interval`，记录 `LCD_FPS`、`LCD`、`CAP/FPS`、CPU、`dmesg` 和 `fbset`；若仍黑屏，下一步检查 `BM_ERROR_STAT`、LCDIF IRQ 是否持续触发、像素时钟和背光电源，再评估带状态轮询的 LCDIF 重新初始化路径。
+
+## 2026-11-02：增加 CAP 与处理 FPS 差距的诊断统计
+
+&emsp;&emsp;方案取舍：为区分 MJPEG 按需解码、BGR 分发、队列丢弃与等待，在原处理循环内使用单调时钟累计各阶段次数、平均和最大墙钟耗时；处理线程 CPU 时钟与整机 `/proc/stat` 空闲率分别报告。队列在原互斥锁内记录累计入队、取出、满载丢弃及最高水位，提供满足守恒关系的一致快照。选择窗口聚合而非逐帧打印，以减少串口与锁竞争对测量的干扰；完整 trace 或每阶段 CPU 时钟调用开销更大，仅在窗口指标缩小范围后再使用。
+
+&emsp;&emsp;风险与线程安全：队列计数和元素变动同锁，拒绝入队与失败取出不增加计数；其他阶段计数只由处理线程维护。队列容量、丢旧策略、LCD 子进程协议和数据流均不改变。时钟读取仍有固定开销，日志可能阻塞，所以将完整报告路径的耗时作为 `REPORT_PREV` 记入下一窗口。第一窗口和多时钟采样存在边界偏差；无帧或线程长期卡住时不能按秒输出，这些统计不能替代 watchdog 或具体锁跟踪。`THREAD_CPU` 不包含后台人脸线程和 LCD 子进程，`SYS_IDLE` 不把 iowait 合并为 idle。
+
+&emsp;&emsp;调试定位：旧 `JPEG` 只覆盖压缩数据移动/编码，遗漏前面的按需解码、人脸 clone 和共享 BGR 复制，容易把 `JPEG≈0` 误读成处理全程免费。本次增加 `DECODE`、`FACE_SUBMIT`、`LCD_PUBLISH`、`HEALTH`、`JPEG`、`PUSH`、总 `WORK`、取帧 `WAIT` 和队列年龄 `AGE`，并用 raw 丢帧计数检查 CAP/FPS 差额。主机回归覆盖满载丢弃、关闭后拒绝入队和并发快照守恒；临时模拟帧程序调用真实 encodeLoop，检查纯转发、解码提交与突发供帧的报告，无真实板端结论。
+
+&emsp;&emsp;性能观测与优化方向：先运行纯 MJPEG 转发基线，再分别启用 LCD 与人脸，固定曝光、分辨率和客户端数量，观察 `RAW_DROP`、阶段最大耗时、`THREAD_CPU`、`SYS_IDLE` 与 `REPORT_PREV`。如果解码占主要成本，再评估独立解码支路；如果报告耗时过高，则降低诊断输出；如果墙钟远高于 CPU 时间，应继续查锁和调度。主机构建及视频回归通过，ARM `package_arm` 已生成 `dist_arm/cam_server_arm`；目标板帧率、CPU 和设备同步仍需实测。

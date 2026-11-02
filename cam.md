@@ -26,7 +26,7 @@ mkdir -p /root/photos
 
 触摸并释放圆形按钮时，应依次看到 `[Touch] Release ...`、`[Touch] Photo button activated ...` 和 `[Touch] Photo saved: /root/photos/snapshot_....jpg`；使用 `ls -lh /root/photos` 检查文件。
 
-本工程在 i.MX6ULL Linux 板卡上采集 YUYV 视频，同时输出到 LCD 和浏览器，并支持截图保存与下载。目标 LCD 为 1280x640；程序以 framebuffer 驱动报告的实际模式为准。
+本工程在 i.MX6ULL Linux 板卡上采集 YUYV 视频，同时输出到 LCD 和浏览器，并支持截图保存与下载。目标 LCD 为 1024x600；程序以 framebuffer 驱动报告的实际模式为准。
 
 ## 文件功能描述
 
@@ -67,9 +67,66 @@ cam/
 | [tests/face_analyzer_test.cpp](tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
 | [Makefile](Makefile)、[Makefile.arm](Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
 
-仓库包含用户态应用，不包含设备树、摄像头驱动、LCD 驱动或板级根文件系统。
+仓库包含用户态应用和 `drv/lcd_drv.c` LCDIF framebuffer 驱动；设备树、摄像头驱动和板级根文件系统由 SDK 提供。
 
 ## 实现方式与收益
+
+### LCD 性能统计口径与面试学习入口
+
+&emsp;&emsp;[interview.md](interview.md) 补充了 LCD 帧率测量、低帧率与低 CPU 并存、行缓冲与 DMA/cache 的关系、跨进程信号量通知四组问答，结合 `src/main.cpp`、`src/lcd_process.cpp`、`src/framebuffer.cpp` 和 `drv/lcd_drv.c` 说明实际数据流、测量边界及优化方法。新增处理流水线统计的字段和运行方法见下节。
+
+&emsp;&emsp;当前 `LCD_FPS` 是 `display.render()` 成功完成次数除以统计窗口墙钟秒数；`LCD` 是该调用平均耗时，包含启用时的同步等待，不包含前面的新帧等待和后面的统计面板绘制。两者不能直接等同于面板扫描频率或每张新图完整上屏的速率；单缓冲、无 IRQ、翻页回退时尤其需要区分。现有驱动等待通用帧完成事件，没有逐帧核对目标页面与 `CUR_BUF`，不能据此宣称严格的实际呈现计数。
+
+&emsp;&emsp;学习时按“父进程解码/抽样发布 → 共享槽 READY 与信号量通知 → 子进程缩放/行打包 → WC framebuffer 写入 → VSYNC/翻页 → LCDIF 扫描”追踪。MJPEG `--lcd-interval N` 限制的是每 N 个处理帧发布一次，不能以 `CAP` 推断 LCD 供帧速率。低 CPU 可能来自供帧、锁、硬件等待或调度；运行中的内存访问停顿通常仍计入 CPU 时间，不能混为睡眠。
+
+&emsp;&emsp;复测保持摄像头格式、曝光和分辨率一致，MJPEG 可用 `--lcd-interval 1` 排除主动抽样，并比较发布/完成次数及各阶段墙钟和 CPU 时间。期望看到供帧不足、像素处理、显存拷贝或 ioctl 等待中的具体限制，而不是预设 LCD 必须达到 CAP。面板频率需连续硬件事件或 VSYNC 信号测量；真实新帧呈现需关联帧号、硬件生效页与外部录像。当前无这些新增统计或板端测量结果，详见面试问答中的验证步骤。
+
+&emsp;&emsp;[interview.md](interview.md) 另补充“CPU 约 50%、MJPEG 已压缩，为何主处理 FPS 仍低于 CAP”的问答。当前处理线程在 JPEG 入队前仍按需执行解码、人脸任务 clone 和 LCD 共享 BGR 复制；`JPEG` 耗时只覆盖压缩数据移动，不能代表处理全程。父进程不等待 LCD 绘制完成，LCD 抽样也不直接降低主处理帧计数。持续 CAP 与 FPS 差额应结合 raw 满载丢帧数验证，当前源码两个队列容量均为 3；可对照纯转发、仅 LCD、仅人脸三组。现已加入下述诊断统计，板端根因仍需依据运行数据确定。
+
+### 处理流水线诊断统计
+
+&emsp;&emsp;`include/bounded_queue.hpp` 在原队列互斥锁内维护累计入队、成功取出、满载丢弃与最高水位，`stats()` 返回一致快照，不重置计数。`src/main.cpp` 使用单调时钟记录处理阶段，用 `CLOCK_THREAD_CPUTIME_ID` 统计处理线程执行时间，并低频读取 `/proc/stat` 获取整机 CPU 空闲比例。数据流、抽样和队列容量不变，不逐帧打印。
+
+&emsp;&emsp;每个约一秒窗口在原 `[Stats]` 后增加 `[Pipeline]` 和 `[Timing]`。输出受既有 `CAM_DEBUG` 控制：重定向或后台运行需要显式 `CAM_DEBUG=1`；计数与计时始终进行，关闭日志仍有少量计时开销。ARM 编译与板端运行示例：
+
+```sh
+make -f Makefile.arm package_arm
+# 将 dist_arm 部署到板卡，在包含 lib 和 assets 的目录运行
+CAM_DEBUG=1 ./cam_server_arm --device /dev/video1 --format mjpeg \
+  --fb /dev/fb0 --no-touch --no-face --lcd-interval 1 \
+  > /tmp/cam-stats.log 2>&1
+```
+
+&emsp;&emsp;测试时固定分辨率、曝光、客户端数量和配置，保存稳定的连续多个窗口。日志写入板端文件可减少串口输出阻塞，但文件写入仍有开销；控制运行时长和文件大小。纯转发基线改用 `--no-lcd --no-touch --no-face`，人脸对照采用面试文档中的参数，并确认模型加载成功。
+
+| `[Pipeline]` 字段 | 含义 |
+| --- | --- |
+| `WINDOW`、`N` | 实际窗口秒数、完成处理的帧数；窗口按处理完成触发，不保证精确一秒或无帧时输出 |
+| `RAW_IN/RAW_OUT/RAW_DROP` | 两次队列快照之间的入队、取出和满载丢弃数量，不是每秒速率 |
+| `RAW_DEPTH/RAW_HIGH` | 当前排队帧数、队列生命周期最高水位；当前容量 3 |
+| `RAW_TOTAL` | 累计入队/取出/满载丢弃；同一快照恒有入队 = 取出 + 丢弃 + 当前深度 |
+| `JPEG_DROP/JPEG_DEPTH` | JPEG 输出队列窗口丢弃数和当前深度；已计入主处理 FPS 的帧仍可能在这里被丢弃 |
+| `THREAD_CPU` | 处理线程窗口 CPU 时间 / 窗口墙钟时间，包含上一轮诊断工作，不是整个父进程 CPU |
+| `SYS_IDLE` | `/proc/stat` 两次读取间整机 idle 占总 CPU ticks 比例，包含其他任务和 IRQ 的影响；idle 不合并 iowait，多核主机为全核汇总 |
+
+&emsp;&emsp;`[Timing]` 的每项统一为 `调用次数/平均毫秒/最大毫秒`，例如 `DECODE=10/5.200/22.000` 表示窗口内执行十次解码，平均 5.2ms，最长 22ms；没有调用时输出 `0/0.000/0.000`。以下阶段时间都是墙钟时间，包含阶段内被抢占或阻塞的时间。
+
+| `[Timing]` 字段 | 统计范围 |
+| --- | --- |
+| `WAIT` | 一次 `raw.take()` 的耗时，包含等数据和队列锁 |
+| `AGE` | 采集线程写入应用时间戳到处理线程取出帧的时间；不含摄像头曝光和内核采集等待 |
+| `WORK` | 取帧后到 JPEG 入队完成的本帧总处理时间；不含局部图像析构、周期报告和取帧等待 |
+| `DECODE` | MJPEG 按需 `imdecode`；YUYV 时为输入校验与 BGR 转换 |
+| `FACE_SUBMIT` | 提交人脸任务，包括抽样/clone 和提交锁，不是后台检测本身 |
+| `LCD_PUBLISH` | 完整共享 BGR 帧发布，含共享锁、拷贝和信号量通知；不含子进程渲染 |
+| `HEALTH` | `waitpid(WNOHANG)` 子进程健康检查 |
+| `JPEG` | MJPEG 压缩字节移动或 YUYV 软件 JPEG 编码 |
+| `PUSH` | JPEG 输出队列入队，含其队列锁 |
+| `REPORT_PREV` | 上一次完整统计报告操作耗时，含快照、LCD 统计访问、字符串生成和日志输出；第一窗口为零，后续记录归入下一窗口 |
+
+&emsp;&emsp;`WORK` 包含多个子阶段，`AGE` 又与等待过程重叠，各项不能直接相加；子阶段只对实际执行的调用求平均，应结合次数判断总成本。`RAW_DROP` 持续增加可确认处理前丢帧；`WORK.max` 高而平均低提示突发停顿；`WAIT` 高提示缺数据或队列锁等待；`REPORT_PREV` 高提示诊断路径可能干扰采集处理。`WORK` 高、`THREAD_CPU` 低只能缩小到等待/抢占等方向，具体锁或系统调用仍需线程跟踪，不能自动判定根因。
+
+&emsp;&emsp;CPU 和队列快照与墙钟边界并非原子采样，首次窗口可能含启动影响，CAP 计数与 raw 入队也不是同一时刻；精确守恒请看 `RAW_TOTAL`，性能结论看稳定多窗口。时钟或 procfs 读取不可用时对应 CPU 字段输出 `n/a`。本次主机验证采用模拟帧，无板端摄像头/LCD 测量，统计不改变原 `LCD_FPS` 的应用绘制口径。
 
 ### 数据流与线程分工
 
@@ -129,9 +186,9 @@ offset = (yoffset + y) * line_length + (xoffset + x) * (bits_per_pixel / 8)
 
 按颜色位域打包像素，并预计算 256 项颜色表。支持小端平台上 16/24/32 位 packed pixels 真彩色，包括常见 RGB565、RGB888、XRGB8888；有透明度位域时写入全不透明值。通道必须互不重叠、每通道不超过 8 位且无 msb_right；调色板、DIRECTCOLOR、灰度、非标准、旋转及 YWRAP 模式被拒绝。
 
-最近邻缩放降低处理开销，放大边缘会较粗糙。画面等比例居中，不拉伸、不裁剪。640x480 视频在 1280x640 面板上显示为 853x640，左右黑边分别为 213 和 214 像素。首次显示及输入尺寸变化时清理可见区域；不覆盖行填充或其他虚拟页面。
+最近邻缩放降低处理开销，放大边缘会较粗糙。画面等比例居中，不拉伸、不裁剪。640x480 视频在 1024x600 面板上显示为 800x600，左右黑边各为 112 像素。首次显示及输入尺寸变化时清理可见区域；不覆盖行填充或其他虚拟页面。
 
-程序使用驱动现有显示模式，不设置 LCD 时序、背光、垂直同步或翻页。退出时解除映射，不主动清屏或恢复先前画面。
+程序使用驱动现有显示模式，不在用户态设置 LCD 时序或背光。仓库内 LCDIF 驱动提供双页显存、`FBIO_WAITFORVSYNC` 和 `FBIOPAN_DISPLAY`；驱动不可用时用户态回退单页绘制。退出时解除映射，不主动清屏或恢复先前画面。
 
 ### 模块接口与所有权
 
@@ -168,7 +225,7 @@ HTTP 监听所有 IPv4 接口，支持 GET 和 HTTP/1.0、HTTP/1.1 请求行。�
 
 Ctrl-C/SIGINT 和 SIGTERM 设置退出标志；采集与编码线程关闭队列，主线程等待工作线程，再关闭 HTTP 客户端和采集设备。正常退出返回 0；参数、初始化、采集或处理故障返回 1。退出耗时受当前处理帧、驱动 ioctl 和客户端操作影响，不承诺固定时限。
 
-目前不支持 UYVY、多平面采集、音频、录像、帧率参数、硬件编码、LCD 双缓冲或自动重连。YUYV 模式的 JPEG 使用 CPU 编码；MJPEG 模式可复用相机 JPEG，但 LCD/人脸处理仍使用 CPU 解码。单页面显存写入可能出现撕裂。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
+目前不支持 UYVY、多平面采集、音频、录像、帧率参数、硬件编码或自动重连。YUYV 模式的 JPEG 使用 CPU 编码；MJPEG 模式可复用相机 JPEG，但 LCD/人脸处理仍使用 CPU 解码。LCDIF 页翻转依赖仓库驱动及板端 IRQ 配置；欠载恢复位可以缓解 FIFO underflow，但不能替代电源、时序、时钟和 DMA 总线问题的板端排查。摄像头色彩范围和矩阵按当前 OpenCV 转换路径处理，没有根据 V4L2 色彩元数据动态选择。触摸线程不执行自动校准，若触摸面板旋转方向与 framebuffer 不一致，需要在 BSP 或驱动层修正。
 
 ### Haar 人脸检测与灰度图比对
 
@@ -232,7 +289,7 @@ Validation: all 147 function comment blocks use English `@brief` descriptions. T
 | 板端触摸屏 | 可读的 evdev 事件节点，提供 `BTN_TOUCH`/`BTN_LEFT` 与绝对 X/Y 轴 |
 | 板端存储与网络 | 可写截图目录、足够剩余空间、可达的 HTTP 端口和匹配动态库 |
 
-LCD 的 1280x640 分辨率、像素时钟、同步极性和引脚配置由板卡 BSP/设备树完成。触摸设备节点和坐标轴范围由触摸驱动注册。避免 fbcon、图形服务或其他进程同时写同一显存；程序运行中不要更改 framebuffer 模式。
+LCD 的 1024x600 分辨率、像素时钟、同步极性和引脚配置由板卡 BSP/设备树完成。触摸设备节点和坐标轴范围由触摸驱动注册。避免 fbcon、图形服务或其他进程同时写同一显存；程序运行中不要更改 framebuffer 模式。
 
 ### Linux 本机构建与测试
 
@@ -549,7 +606,7 @@ Start-Process "http://$wslIp`:18081/"
 成功启动日志示例，实际设备名称和位深可能不同。`CAP` 表示应用从 V4L2 收到帧的速率，`FPS` 表示完成 LCD/JPEG 处理的速率：
 
 ```text
-[LCD] /dev/fb0 1280x640 16 bpp, stride=2560
+[LCD] /dev/fb0 1024x600 16 bpp, stride=2048
 [LCD] PHOTO button x=1176 y=536 w=80 h=80
 [V4L2] 驱动: <driver> 设备: <card>
 [V4L2] 分辨率为640x480 YUYV
@@ -567,7 +624,7 @@ Start-Process "http://$wslIp`:18081/"
 
 LCD 显示居中视频和黑边；网页显示同一视频源经 JPEG 压缩后的画面，两者更新时间不保证同步。JPEG 和截图保留摄像头实际分辨率，不采用 LCD 缩放尺寸。
 
-LCD 打开后会立即在右下角显示小型圆形白色快门按钮，按钮坐标同时输出为 `[LCD] PHOTO button x=... y=... w=... h=...`。1280x640 面板的默认几何为 `x=1176 y=536 w=80 h=80`；1024x600 面板为 `x=920 y=496 w=80 h=80`。触摸释放时会先打印 `[Touch] Release raw=... screen=...`，命中后打印 `[Touch] Photo button activated ...; capturing latest JPEG`，成功则输出 `[Touch] Photo saved: /root/photos/snapshot_....jpg`。触摸其他区域会输出 `Tap outside photo button`；没有首帧时输出 `no camera frame is available`。网页截图仍返回并保存到同一目录。
+LCD 打开后会立即在右下角显示小型圆形白色快门按钮，按钮坐标同时输出为 `[LCD] PHOTO button x=... y=... w=... h=...`。1024x600 面板的默认几何为 `x=920 y=496 w=80 h=80`。触摸释放时会先打印 `[Touch] Release raw=... screen=...`，命中后打印 `[Touch] Photo button activated ...; capturing latest JPEG`，成功则输出 `[Touch] Photo saved: /root/photos/snapshot_....jpg`。触摸其他区域会输出 `Tap outside photo button`；没有首帧时输出 `no camera frame is available`。网页截图仍返回并保存到同一目录。
 
 浏览器访问 `http://板卡IPv4地址:8080/`。以下是接口约定：
 

@@ -21,6 +21,7 @@
 #define LCDIF_CTRL1_VSYNC_EDGE_IRQ_EN     (1U << 12)
 #define LCDIF_CTRL1_CUR_FRAME_DONE_IRQ    (1U << 9)
 #define LCDIF_CTRL1_VSYNC_EDGE_IRQ        (1U << 8)
+#define LCDIF_CTRL1_RECOVER_ON_UNDERFLOW  (1U << 24)
 
 /* rigister table */
 struct imx6ull_lcdif {
@@ -205,6 +206,9 @@ static int lcd_controller_init(struct imx6ull_lcdif *lcdif,
 	} else {
 		writel(readl(&lcdif->CTRL1) | (0xfU << 16), &lcdif->CTRL1);
 	}
+	/* Recover on the next frame if the LCDIF FIFO underflows. */
+	writel(readl(&lcdif->CTRL1) | LCDIF_CTRL1_RECOVER_ON_UNDERFLOW,
+	       &lcdif->CTRL1);
 	writel((dt->vactive.typ << 16) | dt->hactive.typ,
 	       &lcdif->TRANSFER_COUNT);
 	writel((1U << 28) | (vsync_pol << 27) | (hsync_pol << 26) |
@@ -243,6 +247,7 @@ static irqreturn_t lcdif_irq_handler(int irq, void *data)
 		  LCDIF_CTRL1_VSYNC_EDGE_IRQ;
 	if (!status)
 		return IRQ_NONE;
+	// 处理 VSYNC 垂直同步信号
 	if (status & LCDIF_CTRL1_CUR_FRAME_DONE_IRQ) {
 		writel(LCDIF_CTRL1_CUR_FRAME_DONE_IRQ,
 		       &drv->lcdif->CTRL1_CLR);
@@ -460,6 +465,7 @@ static int mylcd_probe(struct platform_device *pdev)
 	drv->fb_size = page_size * 2;
 	info->fix.smem_len = drv->fb_size;
 	drv->fb_dma = 0;
+	/* 写合并 */
 	info->screen_base = dma_alloc_wc(&pdev->dev, drv->fb_size,
 					&drv->fb_dma, GFP_KERNEL);
 	if (!info->screen_base) {

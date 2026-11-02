@@ -8,6 +8,11 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <algorithm>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <time.h>
 #include "v4l2.hpp"
 #include "jpeg_encoder.hpp"
 #include "framebuffer.hpp"
@@ -77,6 +82,65 @@ void onSignal(int) {
 int64_t nowUs() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// Accumulate wall-clock durations without writing per-frame diagnostic messages.
+struct StageTiming {
+    uint64_t count = 0;
+    double totalMs = 0.0;
+    double maxMs = 0.0;
+
+    /**
+     * @brief  Add one completed operation to this window's timing distribution.
+     * @param  [in] start Monotonic timestamp recorded before the operation.
+     */
+    void add(std::chrono::steady_clock::time_point start) {
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start).count();
+        ++count;
+        totalMs += ms;
+        maxMs = std::max(maxMs, ms);
+    }
+
+    /**
+     * @brief  Append the sample count, average and maximum milliseconds to a report.
+     * @param  [in,out] output Report receiving the timing summary.
+     * @param  [in] name Stage name printed before the summary.
+     */
+    void append(std::ostream& output, const char* name) const {
+        output << ' ' << name << '=' << count << '/'
+               << (count ? totalMs / count : 0.0) << '/' << maxMs;
+    }
+};
+
+/**
+ * @brief  Read CPU execution time for the calling processing thread.
+ * @retval Nonnegative CPU milliseconds, or -1 when the clock is unavailable.
+ */
+double threadCpuMs() {
+    timespec time{};
+    if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0) return -1.0;
+    return time.tv_sec * 1000.0 + time.tv_nsec / 1000000.0;
+}
+
+struct SystemCpuSample {
+    uint64_t total = 0;
+    uint64_t idle = 0;
+    bool valid = false;
+};
+
+/**
+ * @brief  Sample aggregate Linux CPU ticks without counting guest time twice.
+ * @retval SystemCpuSample CPU totals, or an invalid sample if procfs is unavailable.
+ * @note   Idle excludes iowait; this sample describes the whole system, not one process.
+ */
+SystemCpuSample systemCpuSample() {
+    std::ifstream input("/proc/stat");
+    std::string label;
+    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+    if (!(input >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal)
+        || label != "cpu") return {};
+    return {user + nice + system + idle + iowait + irq + softirq + steal, idle, true};
 }
 
 /**
@@ -197,7 +261,7 @@ void printHelp() {
 }
 
 /**
- * @brief  Capture camera frames and enqueue owned YUYV payloads.
+ * @brief  Capture camera frames and enqueue owned YUYV or MJPEG payloads.
  * @param  [in,out] capture Initialized, streaming camera object.
  * @param  [in,out] raw Destination queue for captured frames.
  * @param  [in,out] state Shared failure and shutdown state.
@@ -228,7 +292,7 @@ void captureLoop(V4l2Capture& capture, BoundedQueue<Frame>& raw, PipelineState& 
 
 /**
  * @brief  Convert each frame once, optionally display it, and enqueue JPEG output.
- * @param  [in,out] raw Source queue for YUYV frames.
+ * @param  [in,out] raw Source queue for captured YUYV or MJPEG frames.
  * @param  [in,out] jpeg Destination queue for encoded frames.
  * @param  [in,out] lcd LCD process controller used when LCD output is active.
  * @param  [in] lcdActive Whether the display was initialized.
@@ -249,15 +313,28 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
         // Performance counters for the one-second statistics window.
         using Clock = std::chrono::steady_clock;
         auto statsStart = Clock::now();
+        double cpuStartMs = threadCpuMs();
+        auto systemStart = systemCpuSample();
+        auto rawStart = raw.stats();
+        auto jpegStart = jpeg.stats();
         uint64_t lastCapturedFrames = state.capturedFrames.load();
         uint64_t statsFrames = 0;
         double encodeMs = 0.0;
         uint64_t inputFrames = 0;
+        StageTiming waitTiming, workTiming, ageTiming, decodeTiming, faceTiming;
+        StageTiming publishTiming, healthTiming, jpegTiming, pushTiming, reportTiming;
 
         JpegEncoder encoder;
         Frame frame;
-        while (raw.take(frame)) {
+        while (true) {
+            const auto waitStart = Clock::now();
+            if (!raw.take(frame)) break;
+            waitTiming.add(waitStart);
             if (!signalRunning || state.stop) break;
+            const auto workStart = Clock::now();
+            // Capture timestamps use the same monotonic clock; this is application queue age.
+            ageTiming.add(Clock::time_point(std::chrono::duration_cast<Clock::duration>(
+                std::chrono::microseconds(frame.timestamp_us))));
             const uint64_t frameIndex = inputFrames++;
             const bool renderFrame = lcdActive && (!mjpegInput ||
                 frameIndex % static_cast<uint64_t>(lcdInterval) == 0);
@@ -267,7 +344,9 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
             const cv::Mat* bgr = nullptr;
             if (mjpegInput) {
                 if (renderFrame || analyzeFrame) {
+                    const auto decodeStart = Clock::now();
                     decoded = cv::imdecode(frame.data, cv::IMREAD_COLOR);
+                    decodeTiming.add(decodeStart);
                     if (decoded.empty())
                         throw std::runtime_error("Cannot decode camera MJPEG frame");
                     if (decoded.cols != frame.width || decoded.rows != frame.height)
@@ -275,24 +354,33 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                     bgr = &decoded;
                 }
             } else {
+                const auto decodeStart = Clock::now();
                 const size_t required = static_cast<size_t>(frame.bytes_per_line) *
                                         (frame.height - 1) + static_cast<size_t>(frame.width) * 2;
                 if (frame.data.size() < required)
                     throw std::runtime_error("Incomplete YUYV frame");
                 bgr = &encoder.convertToBgr(frame.data.data(), frame.width,
                     frame.height, static_cast<size_t>(frame.bytes_per_line));
+                decodeTiming.add(decodeStart);
             }
             if (analyzeFrame && bgr) {
+                const auto faceStart = Clock::now();
                 if (mjpegInput) faceWorker.submitSelected(*bgr);
                 else faceWorker.submit(*bgr);
+                faceTiming.add(faceStart);
             }
 
             if (renderFrame) {
+                const auto publishStart = Clock::now();
                 if (!bgr || !lcd.publish(*bgr, frame.sequence))
                     throw std::runtime_error("LCD frame publish failed");
+                publishTiming.add(publishStart);
             }
-            if (lcdActive && !lcd.healthy())
-                throw std::runtime_error("LCD process stopped");
+            if (lcdActive) {
+                const auto healthStart = Clock::now();
+                if (!lcd.healthy()) throw std::runtime_error("LCD process stopped");
+                healthTiming.add(healthStart);
+            }
             Frame encoded;
             encoded.sequence = frame.sequence;
             encoded.width = frame.width;
@@ -305,13 +393,22 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
                 encoded.data = encoder.encodeBgr(*bgr, quality);
             }
             encodeMs += std::chrono::duration<double, std::milli>(Clock::now() - encodeStart).count();
+            jpegTiming.add(encodeStart);
+            const auto pushStart = Clock::now();
             jpeg.push(std::move(encoded));
+            pushTiming.add(pushStart);
+            workTiming.add(workStart);
 
             ++statsFrames;
             const auto now = Clock::now();
             const double elapsed = std::chrono::duration<double>(now - statsStart).count();
 
             if(elapsed >= 1.0) {
+                const auto reportStart = Clock::now();
+                const double cpuNowMs = threadCpuMs();
+                const auto systemNow = systemCpuSample();
+                const auto rawNow = raw.stats();
+                const auto jpegNow = jpeg.stats();
                 DisplayStats stats;
                 stats.fps    = statsFrames / elapsed;
                 const uint64_t capturedFrames = state.capturedFrames.load();
@@ -323,16 +420,59 @@ void encodeLoop(BoundedQueue<Frame>& raw, BoundedQueue<Frame>& jpeg,
 
                 if (lcdActive) lcd.updateStats(stats);
 
-                CAM_DEBUG("[Stats] CAP=" << stats.captureFps
-                          << " FPS=" << stats.fps
-                          << " LCD_FPS=" << stats.lcdFps
-                          << " LCD=" << stats.lcdMs << "ms"
-                          << " JPEG=" << stats.jpegMs << "ms");
+                if (camDebugEnabled()) {
+                    // Build one report in memory to avoid fragmented serial writes per field.
+                    std::ostringstream output;
+                    output << std::fixed << std::setprecision(3)
+                           << "[Stats] CAP=" << stats.captureFps << " FPS=" << stats.fps
+                           << " LCD_FPS=" << stats.lcdFps << " LCD=" << stats.lcdMs
+                           << "ms JPEG=" << stats.jpegMs << "ms\n"
+                           << "[Pipeline] WINDOW=" << elapsed << "s N=" << statsFrames
+                           << " RAW_IN=" << rawNow.pushed - rawStart.pushed
+                           << " RAW_OUT=" << rawNow.taken - rawStart.taken
+                           << " RAW_DROP=" << rawNow.dropped - rawStart.dropped
+                           << " RAW_DEPTH=" << rawNow.depth
+                           << " RAW_HIGH=" << rawNow.highWater
+                           << " RAW_TOTAL=" << rawNow.pushed << '/' << rawNow.taken
+                           << '/' << rawNow.dropped
+                           << " JPEG_DROP=" << jpegNow.dropped - jpegStart.dropped
+                           << " JPEG_DEPTH=" << jpegNow.depth << " THREAD_CPU=";
+                    if (cpuStartMs >= 0.0 && cpuNowMs >= cpuStartMs)
+                        output << (cpuNowMs - cpuStartMs) / (elapsed * 10.0) << '%';
+                    else output << "n/a";
+                    output << " SYS_IDLE=";
+                    if (systemStart.valid && systemNow.valid &&
+                        systemNow.total > systemStart.total && systemNow.idle >= systemStart.idle)
+                        output << 100.0 * (systemNow.idle - systemStart.idle) /
+                            (systemNow.total - systemStart.total) << '%';
+                    else output << "n/a";
+                    output << "\n[Timing] count/avg_ms/max_ms";
+                    waitTiming.append(output, "WAIT");
+                    ageTiming.append(output, "AGE");
+                    workTiming.append(output, "WORK");
+                    decodeTiming.append(output, "DECODE");
+                    faceTiming.append(output, "FACE_SUBMIT");
+                    publishTiming.append(output, "LCD_PUBLISH");
+                    healthTiming.append(output, "HEALTH");
+                    jpegTiming.append(output, "JPEG");
+                    pushTiming.append(output, "PUSH");
+                    reportTiming.append(output, "REPORT_PREV");
+                    std::cerr << output.str() << std::endl;
+                }
 
                 statsStart = now;
+                cpuStartMs = cpuNowMs;
+                systemStart = systemNow;
+                rawStart = rawNow;
+                jpegStart = jpegNow;
                 lastCapturedFrames = capturedFrames;
                 statsFrames = 0;
                 encodeMs = 0.0;
+                waitTiming = {}; ageTiming = {}; workTiming = {}; decodeTiming = {};
+                faceTiming = {}; publishTiming = {}; healthTiming = {};
+                jpegTiming = {}; pushTiming = {}; reportTiming = {};
+                // Charge diagnostics, including a potentially blocking write, to the next window.
+                reportTiming.add(reportStart);
             }
         }
     } catch (const std::exception& error) {
