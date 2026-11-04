@@ -35,8 +35,13 @@ mkdir -p /root/photos
 ```text
 cam/
 ├── AGENTS.md                 开发约定
-├── cam.md                    技术文档
-├── src/record.md             按时间线记录方案取舍、调试与性能
+├── docs/                     工程文档（构建与运行命令仍在工程根目录执行）
+│   ├── cam.md                技术文档
+│   ├── record.md             按时间线记录方案取舍、调试与性能
+│   ├── interview.md          项目面试问答
+│   ├── performance_basis.md  性能指标的测量依据与验证方法
+│   ├── driver_changes.md     LCDIF 驱动改动说明
+│   └── optimization_plan.md  LCDIF 优化方案
 ├── Makefile                  Linux 本机构建
 ├── Makefile.arm              Buildroot ARM 交叉编译
 ├── include/                  模块接口和数据结构
@@ -51,27 +56,29 @@ cam/
 
 | 文件 | 职责与关键接口 |
 | --- | --- |
-| [src/main.cpp](src/main.cpp) | 解析启动参数；启动 LCD、摄像头、HTTP 和 `FaceAnalysisWorker`；通过 `captureLoop`、`encodeLoop`、主线程发布 JPEG；协调异常及信号退出。 |
-| [src/v4l2.cpp](src/v4l2.cpp)、[include/v4l2.hpp](include/v4l2.hpp) | `V4l2Capture` 封装 YUYV/MJPEG 格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
-| [src/jpeg_encoder.cpp](src/jpeg_encoder.cpp)、[include/jpeg_encoder.hpp](include/jpeg_encoder.hpp) | `convertToBgr` 转换 YUYV，`encodeBgr` 压缩 JPEG；`encode` 保留直接编码 YUYV 的接口。 |
-| [src/framebuffer.cpp](src/framebuffer.cpp)、[include/framebuffer.hpp](include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
-| [src/touchscreen.cpp](src/touchscreen.cpp)、[include/touchscreen.hpp](include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
-| [src/http_server.cpp](src/http_server.cpp)、[include/http_server.hpp](include/http_server.hpp) | `HttpServer` 提供网页、MJPEG 和截图，维护最新 JPEG、客户端数量和截图配额。页面 HTML/CSS/JavaScript 内嵌在源文件中。 |
-| [src/face_analyzer.cpp](src/face_analyzer.cpp)、[include/face_analyzer.hpp](include/face_analyzer.hpp) | 使用 OpenCV Haar cascade 检测人脸，并对检测到的人脸执行归一化灰度图相似度比对；`FaceAnalysisWorker` 在后台线程按间隔处理抽样帧。 |
-| [assets/haarcascade_frontalface_default.xml](assets/haarcascade_frontalface_default.xml) | OpenCV `haarcascade_frontalface_default` 模型；运行时按 `--face-cascade` 加载。 |
-| [include/frame.hpp](include/frame.hpp) | `Frame` 保存数据、序号、尺寸、行跨度和单调时钟时间戳。 |
-| [include/bounded_queue.hpp](include/bounded_queue.hpp) | `BoundedQueue<T>` 提供线程安全的 `push`、阻塞 `take` 和 `close`。 |
-| [tests/video_test.cpp](tests/video_test.cpp) | 校验显示像素、黑边、偏移、显存保护区、YUYV 行跨度、JPEG 和队列。 |
-| [tests/v4l2_test.cpp](tests/v4l2_test.cpp) | 通过 GNU 链接器 `--wrap` 模拟系统调用，验证驱动协商、坏帧处理及失败清理。 |
-| [tests/http_server_test.cpp](tests/http_server_test.cpp) | 通过本机 TCP 验证路由、截图内容、配额、非法请求、断开连接及重启。 |
-| [tests/face_analyzer_test.cpp](tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
-| [Makefile](Makefile)、[Makefile.arm](Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
+| [src/main.cpp](../src/main.cpp) | 解析启动参数；启动 LCD、摄像头、HTTP 和 `FaceAnalysisWorker`；通过 `captureLoop`、`encodeLoop`、主线程发布 JPEG；协调异常及信号退出。 |
+| [src/v4l2.cpp](../src/v4l2.cpp)、[include/v4l2.hpp](../include/v4l2.hpp) | `V4l2Capture` 封装 YUYV/MJPEG 格式协商、MMAP 缓冲区、`poll` 取帧和资源释放。 |
+| [src/jpeg_encoder.cpp](../src/jpeg_encoder.cpp)、[include/jpeg_encoder.hpp](../include/jpeg_encoder.hpp) | `convertToBgr` 转换 YUYV，`encodeBgr` 压缩 JPEG；`encode` 保留直接编码 YUYV 的接口。 |
+| [src/framebuffer.cpp](../src/framebuffer.cpp)、[include/framebuffer.hpp](../include/framebuffer.hpp) | `FramebufferDisplay` 管理设备和显存；`FramebufferSurface` 校验内存布局并绘制，可绑定测试内存。 |
+| [src/touchscreen.cpp](../src/touchscreen.cpp)、[include/touchscreen.hpp](../include/touchscreen.hpp) | 读取 Linux evdev 触摸释放事件，自动识别带触摸按键和绝对 X/Y 轴的 `/dev/input/event*`，归一化到 LCD 坐标。 |
+| [src/http_server.cpp](../src/http_server.cpp)、[include/http_server.hpp](../include/http_server.hpp) | `HttpServer` 提供网页、MJPEG 和截图，维护最新 JPEG、客户端数量和截图配额。页面 HTML/CSS/JavaScript 内嵌在源文件中。 |
+| [src/face_analyzer.cpp](../src/face_analyzer.cpp)、[include/face_analyzer.hpp](../include/face_analyzer.hpp) | 使用 OpenCV Haar cascade 检测人脸，并对检测到的人脸执行归一化灰度图相似度比对；`FaceAnalysisWorker` 在后台线程按间隔处理抽样帧。 |
+| [assets/haarcascade_frontalface_default.xml](../assets/haarcascade_frontalface_default.xml) | OpenCV `haarcascade_frontalface_default` 模型；运行时按 `--face-cascade` 加载。 |
+| [include/frame.hpp](../include/frame.hpp) | `Frame` 保存数据、序号、尺寸、行跨度和单调时钟时间戳。 |
+| [include/bounded_queue.hpp](../include/bounded_queue.hpp) | `BoundedQueue<T>` 提供线程安全的 `push`、阻塞 `take` 和 `close`。 |
+| [tests/video_test.cpp](../tests/video_test.cpp) | 校验显示像素、黑边、偏移、显存保护区、YUYV 行跨度、JPEG 和队列。 |
+| [tests/v4l2_test.cpp](../tests/v4l2_test.cpp) | 通过 GNU 链接器 `--wrap` 模拟系统调用，验证驱动协商、坏帧处理及失败清理。 |
+| [tests/http_server_test.cpp](../tests/http_server_test.cpp) | 通过本机 TCP 验证路由、截图内容、配额、非法请求、断开连接及重启。 |
+| [tests/face_analyzer_test.cpp](../tests/face_analyzer_test.cpp) | 验证灰度相似度边界、无效输入、Haar 模型加载和空图像检测。 |
+| [Makefile](../Makefile)、[Makefile.arm](../Makefile.arm) | 设置 C++14、编译依赖、输出目录和测试目标；头文件变更会触发重新构建。 |
 
 仓库包含用户态应用和 `drv/lcd_drv.c` LCDIF framebuffer 驱动；设备树、摄像头驱动和板级根文件系统由 SDK 提供。
 
 ## 实现方式与收益
 
 ### LCD 性能统计口径与面试学习入口
+
+&emsp;&emsp;工程说明文档统一保存在 `docs/`，开发约定 `AGENTS.md` 保留在工程根目录。[性能评估依据](performance_basis.md) 独立说明各项性能的事件来源、计时边界、计算公式、LCD 垂直同步关系以及板端验证方法；[驱动改动说明](driver_changes.md) 和 [LCDIF 优化方案](optimization_plan.md) 提供驱动侧背景。本文命令中的相对路径均以工程根目录为基准，板端命令以部署目录为基准。
 
 &emsp;&emsp;[interview.md](interview.md) 补充了 LCD 帧率测量、低帧率与低 CPU 并存、行缓冲与 DMA/cache 的关系、跨进程信号量通知四组问答，结合 `src/main.cpp`、`src/lcd_process.cpp`、`src/framebuffer.cpp` 和 `drv/lcd_drv.c` 说明实际数据流、测量边界及优化方法。新增处理流水线统计的字段和运行方法见下节。
 
